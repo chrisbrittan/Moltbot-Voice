@@ -1,0 +1,50 @@
+{
+  "id": "working-memory",
+  "name": "Working Memory",
+  "description": "Protected context layer for PA brain - identity, active context, facts, integrations",
+  "version": "2026.1.27-beta.1",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "extraction": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "model": { "type": "string", "default": "claude-3-5-haiku-latest" },
+          "provider": { "type": "string", "default": "anthropic" }
+        }
+      },
+      "identity": {
+        "type": "object",
+        "properties": {
+          "allowChatUpdates": { "type": "boolean", "default": true },
+          "lockedTraits": { "type": "array", "items": { "type": "string" }, "default": [] }
+        }
+      },
+      "injection": {
+        "type": "object",
+        "properties": {
+          "identityTokens": { "type": "number", "default": 1500 },
+          "activeContextTokens": { "type": "number", "default": 1000 },
+          "factsTokens": { "type": "number", "default": 1000 },
+          "integrationTokens": { "type": "number", "default": 1000 },
+          "historyChunksTokens": { "type": "number", "default": 2000 }
+        }
+      },
+      "integrations": {
+        "type": "object",
+        "properties": {
+          "defaultTtl": { "type": "number", "default": 300 },
+          "refreshOnMention": { "type": "boolean", "default": true }
+        }
+      },
+      "storage": {
+        "type": "object",
+        "properties": {
+          "dbPath": { "type": "string", "default": "working-memory" }
+        }
+      }
+    }
+  }
+}

@@ -258,6 +258,11 @@ const workingMemoryPlugin = {
     // CLI Commands
     // ========================================================================
 
+    // Helper to ensure store is initialized for CLI commands
+    const ensureInit = async () => {
+      await store.initialize();
+    };
+
     api.registerCli(
       ({ program }) => {
         const wm = program
@@ -267,6 +272,7 @@ const workingMemoryPlugin = {
         wm.command("status")
           .description("Show working memory status")
           .action(async () => {
+            await ensureInit();
             const status = await store.getStatus();
             console.log(JSON.stringify(status, null, 2));
           });
@@ -274,6 +280,7 @@ const workingMemoryPlugin = {
         wm.command("identity")
           .description("Show current identity")
           .action(async () => {
+            await ensureInit();
             const id = await identity.get();
             console.log(JSON.stringify(id, null, 2));
           });
@@ -281,6 +288,7 @@ const workingMemoryPlugin = {
         wm.command("context")
           .description("Show active context")
           .action(async () => {
+            await ensureInit();
             const ctx = await activeContext.get();
             console.log(JSON.stringify(ctx, null, 2));
           });
@@ -290,6 +298,7 @@ const workingMemoryPlugin = {
           .option("--category <cat>", "Filter by category")
           .option("--limit <n>", "Max results", "50")
           .action(async (opts) => {
+            await ensureInit();
             const results = await facts.list({
               category: opts.category,
               limit: parseInt(opts.limit),
@@ -301,6 +310,7 @@ const workingMemoryPlugin = {
           .description("Search facts")
           .argument("<query>", "Search query")
           .action(async (query) => {
+            await ensureInit();
             const results = await facts.search(query, { limit: 20 });
             console.log(JSON.stringify(results, null, 2));
           });
@@ -309,6 +319,7 @@ const workingMemoryPlugin = {
           .description("Reset working memory (dangerous!)")
           .option("--confirm", "Confirm reset")
           .action(async (opts) => {
+            await ensureInit();
             if (!opts.confirm) {
               console.log("Use --confirm to reset working memory");
               return;
