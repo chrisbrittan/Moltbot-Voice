@@ -9,7 +9,9 @@ import type { IdentityManager } from "./identity.js";
 import type { ActiveContextManager } from "./active-context.js";
 import type { FactStore } from "./facts.js";
 import type { IntegrationCache } from "./integrations.js";
-import type { AssembledContext, Logger } from "./types.js";
+import type { EmbeddingService } from "./embeddings.js";
+import type { VectorStore } from "./vector-store.js";
+import type { AssembledContext, HistoryChunk, Logger } from "./types.js";
 
 interface InjectionConfig {
   identityTokens: number;
@@ -20,6 +22,9 @@ interface InjectionConfig {
 }
 
 export class ContextInjector {
+  private embeddings: EmbeddingService | null = null;
+  private vectorStore: VectorStore | null = null;
+
   constructor(
     private readonly identity: IdentityManager,
     private readonly activeContext: ActiveContextManager,
@@ -28,6 +33,20 @@ export class ContextInjector {
     private readonly config: InjectionConfig,
     private readonly logger: Logger
   ) {}
+
+  /**
+   * Set the embedding service for semantic history retrieval (Phase 2)
+   */
+  setEmbeddingService(embeddings: EmbeddingService): void {
+    this.embeddings = embeddings;
+  }
+
+  /**
+   * Set the vector store for semantic history retrieval (Phase 2)
+   */
+  setVectorStore(vectorStore: VectorStore): void {
+    this.vectorStore = vectorStore;
+  }
 
   /**
    * Assemble all working memory layers into context for injection.
@@ -75,9 +94,12 @@ export class ContextInjector {
       layers.integrations = integrationContext.tokens;
     }
 
-    // Layer 5: History Chunks (retrieved based on prompt + active context)
-    // TODO: Implement semantic history chunk retrieval
-    // For now, this is a placeholder for Phase 2
+    // Layer 5: History Chunks (semantic retrieval via embeddings - Phase 2)
+    const historyContext = await this.assembleHistoryChunks(prompt);
+    if (historyContext) {
+      sections.push(historyContext.content);
+      layers.historyChunks = historyContext.tokens;
+    }
 
     if (sections.length === 0) {
       return null;
@@ -201,6 +223,86 @@ ${content}
       this.logger.warn(`injection: failed to assemble integrations: ${String(err)}`);
       return null;
     }
+  }
+
+  private async assembleHistoryChunks(prompt: string): Promise<{ content: string; tokens: number } | null> {
+    // Skip if embeddings not configured
+    if (!this.embeddings || !this.vectorStore || !this.embeddings.isEnabled()) {
+      return null;
+    }
+
+    try {
+      // Generate embedding for the current prompt
+      const promptEmbedding = await this.embeddings.embed(prompt);
+
+      // Search for semantically similar history chunks
+      const results = await this.vectorStore.search(promptEmbedding.embedding, 5);
+
+      if (results.length === 0) {
+        return null;
+      }
+
+      // Format chunks for context
+      const content = this.formatHistoryChunks(results.map((r) => r.chunk));
+      const tokens = Math.ceil(content.length / 4);
+
+      if (tokens > this.config.historyChunksTokens) {
+        // Trim to fit budget
+        const trimmedResults = this.trimChunksToTokenBudget(
+          results.map((r) => r.chunk),
+          this.config.historyChunksTokens
+        );
+        const trimmedContent = this.formatHistoryChunks(trimmedResults);
+        return { content: trimmedContent, tokens: Math.ceil(trimmedContent.length / 4) };
+      }
+
+      return { content, tokens };
+    } catch (err) {
+      this.logger.warn(`injection: failed to assemble history chunks: ${String(err)}`);
+      return null;
+    }
+  }
+
+  private formatHistoryChunks(chunks: HistoryChunk[]): string {
+    if (chunks.length === 0) return "";
+
+    const formatted = chunks
+      .map((chunk) => {
+        const age = this.getRelativeAge(chunk.createdAt);
+        return `- [${chunk.topic}] (${age}): ${chunk.summary}`;
+      })
+      .join("\n");
+
+    return `<relevant-history>
+Previous conversation context that may be relevant:
+
+${formatted}
+</relevant-history>`;
+  }
+
+  private trimChunksToTokenBudget(chunks: HistoryChunk[], maxTokens: number): HistoryChunk[] {
+    const result: HistoryChunk[] = [];
+    let totalTokens = 50; // Overhead for wrapper
+
+    for (const chunk of chunks) {
+      const chunkTokens = Math.ceil(chunk.summary.length / 4) + 20; // +20 for metadata
+      if (totalTokens + chunkTokens > maxTokens) break;
+      result.push(chunk);
+      totalTokens += chunkTokens;
+    }
+
+    return result;
+  }
+
+  private getRelativeAge(timestamp: number): string {
+    const diff = Date.now() - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    return `${days}d ago`;
   }
 
   // ==========================================================================

@@ -26,6 +26,9 @@ import { IntegrationCache } from "./src/integrations.js";
 import { ContextInjector } from "./src/injection.js";
 import { FactExtractor } from "./src/extraction.js";
 import { registerGatewayMethods } from "./src/gateway.js";
+import { createEmbeddingService, type EmbeddingService } from "./src/embeddings.js";
+import { createVectorStore, type VectorStore } from "./src/vector-store.js";
+import { createHistoryChunkManager, type HistoryChunkManager } from "./src/history-chunks.js";
 
 // ============================================================================
 // Plugin Definition
@@ -44,17 +47,20 @@ const workingMemoryPlugin = {
     const cfg: WorkingMemoryConfig = {
       ...defaultConfig,
       ...userConfig,
+      embeddings: { ...defaultConfig.embeddings, ...userConfig?.embeddings },
       extraction: { ...defaultConfig.extraction, ...userConfig?.extraction },
       identity: { ...defaultConfig.identity, ...userConfig?.identity },
       injection: { ...defaultConfig.injection, ...userConfig?.injection },
       integrations: { ...defaultConfig.integrations, ...userConfig?.integrations },
+      historyChunks: { ...defaultConfig.historyChunks, ...userConfig?.historyChunks },
+      consolidation: { ...defaultConfig.consolidation, ...userConfig?.consolidation },
       storage: { ...defaultConfig.storage, ...userConfig?.storage },
     };
 
     // Resolve storage path
     const storagePath = api.resolvePath(cfg.storage?.dbPath ?? "working-memory");
 
-    // Initialize components
+    // Initialize core components
     const store = new WorkingMemoryStore(storagePath, api.logger);
     const identity = new IdentityManager(store, cfg.identity!, api.logger);
     const activeContext = new ActiveContextManager(store, api.logger);
@@ -62,6 +68,33 @@ const workingMemoryPlugin = {
     const integrations = new IntegrationCache(store, cfg.integrations!, api.logger);
     const injector = new ContextInjector(identity, activeContext, facts, integrations, cfg.injection!, api.logger);
     const extractor = new FactExtractor(store, identity, activeContext, facts, cfg.extraction!, api.logger);
+
+    // Initialize Phase 2 components (embeddings & vector search)
+    let embeddings: EmbeddingService | null = null;
+    let vectorStore: VectorStore | null = null;
+    let historyChunks: HistoryChunkManager | null = null;
+
+    if (cfg.embeddings?.enabled) {
+      embeddings = createEmbeddingService(cfg.embeddings, api.logger);
+      vectorStore = createVectorStore(store, { maxInMemoryChunks: cfg.historyChunks?.maxChunks ?? 100 }, api.logger);
+
+      // Wire up to injector for semantic retrieval
+      injector.setEmbeddingService(embeddings);
+      injector.setVectorStore(vectorStore);
+
+      api.logger.info(
+        `working-memory: embeddings enabled (${cfg.embeddings.provider}/${cfg.embeddings.model})`
+      );
+    }
+
+    // Initialize history chunk manager (Phase 2)
+    if (cfg.historyChunks?.enabled) {
+      historyChunks = createHistoryChunkManager(store, embeddings, vectorStore, cfg.historyChunks, api.logger);
+
+      api.logger.info(
+        `working-memory: history chunks enabled (summarize after ${cfg.historyChunks.summarizeAfterMessages} messages)`
+      );
+    }
 
     api.logger.info(`working-memory: plugin registered (storage: ${storagePath})`);
 
@@ -92,7 +125,7 @@ const workingMemoryPlugin = {
     });
 
     // ========================================================================
-    // After Agent End - Extract Facts and Update Context (Async)
+    // After Agent End - Extract Facts, Update Context, Process History (Async)
     // ========================================================================
 
     api.on("agent_end", async (event, ctx) => {
@@ -108,6 +141,22 @@ const workingMemoryPlugin = {
           });
         } catch (err) {
           api.logger.warn(`working-memory: extraction failed: ${String(err)}`);
+        }
+
+        // Process messages for history chunks (Phase 2)
+        if (historyChunks && event.messages) {
+          try {
+            // Convert messages to the format expected by HistoryChunkManager
+            const conversationMessages = event.messages.map((msg) => ({
+              role: msg.role as "user" | "assistant" | "system",
+              content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+              timestamp: Date.now(),
+            }));
+
+            await historyChunks.processMessages(conversationMessages, ctx.sessionKey, ctx.channelId);
+          } catch (err) {
+            api.logger.warn(`working-memory: history chunk processing failed: ${String(err)}`);
+          }
         }
       });
     });
@@ -326,6 +375,51 @@ const workingMemoryPlugin = {
             }
             await store.reset();
             console.log("Working memory reset");
+          });
+
+        // Phase 2: History chunks commands
+        wm.command("chunks")
+          .description("List recent history chunks")
+          .option("--limit <n>", "Max results", "10")
+          .action(async (opts) => {
+            await ensureInit();
+            const chunks = await store.getRecentChunks(parseInt(opts.limit));
+            console.log(JSON.stringify(chunks, null, 2));
+          });
+
+        wm.command("embeddings-status")
+          .description("Show embeddings status")
+          .action(async () => {
+            await ensureInit();
+            const withEmbeddings = await store.getChunksWithEmbeddings(1000);
+            const withoutEmbeddings = await store.getChunksWithoutEmbeddings(1000);
+            console.log(
+              JSON.stringify(
+                {
+                  embeddingsEnabled: cfg.embeddings?.enabled ?? false,
+                  provider: cfg.embeddings?.provider ?? "none",
+                  model: cfg.embeddings?.model ?? "none",
+                  chunksWithEmbeddings: withEmbeddings.length,
+                  chunksWithoutEmbeddings: withoutEmbeddings.length,
+                  vectorStoreSize: vectorStore?.size() ?? 0,
+                },
+                null,
+                2
+              )
+            );
+          });
+
+        wm.command("backfill-embeddings")
+          .description("Generate embeddings for chunks that don't have them")
+          .option("--limit <n>", "Max chunks to process", "50")
+          .action(async (opts) => {
+            await ensureInit();
+            if (!historyChunks) {
+              console.log("History chunks not enabled");
+              return;
+            }
+            const count = await historyChunks.backfillEmbeddings(parseInt(opts.limit));
+            console.log(`Backfilled ${count} embeddings`);
           });
       },
       { commands: ["wm"] }

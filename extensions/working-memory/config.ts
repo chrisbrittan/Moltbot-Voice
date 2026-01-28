@@ -8,10 +8,59 @@ import { Type, type Static } from "@sinclair/typebox";
  * Configuration schema for the Working Memory plugin
  */
 export const workingMemoryConfigSchema = Type.Object({
+  // Embeddings settings (Phase 2)
+  embeddings: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      provider: Type.Optional(
+        Type.String({
+          description: "Embedding provider: openai or ollama",
+          default: "openai",
+        })
+      ),
+      model: Type.Optional(
+        Type.String({
+          description: "Embedding model to use",
+          default: "text-embedding-3-small",
+        })
+      ),
+      dimensions: Type.Optional(
+        Type.Number({
+          description: "Embedding dimensions (model-dependent)",
+          default: 1536,
+        })
+      ),
+      // Ollama-specific settings
+      ollamaBaseUrl: Type.Optional(
+        Type.String({
+          description: "Ollama base URL for local embeddings",
+          default: "http://localhost:11434",
+        })
+      ),
+      // Fallback settings
+      fallbackProvider: Type.Optional(
+        Type.String({
+          description: "Fallback provider if primary fails (e.g., ollama for offline use)",
+        })
+      ),
+      fallbackModel: Type.Optional(
+        Type.String({
+          description: "Fallback model (e.g., nomic-embed-text for Ollama)",
+        })
+      ),
+    })
+  ),
+
   // Extraction settings
   extraction: Type.Optional(
     Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
+      mode: Type.Optional(
+        Type.String({
+          description: "Extraction mode: pattern, llm, or hybrid",
+          default: "pattern",
+        })
+      ),
       model: Type.Optional(
         Type.String({
           description: "Model to use for fact extraction (default: claude-3-5-haiku)",
@@ -59,6 +108,32 @@ export const workingMemoryConfigSchema = Type.Object({
     })
   ),
 
+  // History chunks settings (Phase 2)
+  historyChunks: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      // Max chunks to keep in storage
+      maxChunks: Type.Optional(Type.Number({ default: 100 })),
+      // Create a summary chunk after this many messages
+      summarizeAfterMessages: Type.Optional(Type.Number({ default: 10 })),
+      // Max tokens per chunk summary
+      maxSummaryTokens: Type.Optional(Type.Number({ default: 500 })),
+    })
+  ),
+
+  // Consolidation settings (Phase 2)
+  consolidation: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      // Run consolidation every N hours
+      intervalHours: Type.Optional(Type.Number({ default: 24 })),
+      // Expire facts older than N days with low confidence
+      expireAfterDays: Type.Optional(Type.Number({ default: 30 })),
+      // Confidence threshold for expiration
+      expireConfidenceThreshold: Type.Optional(Type.Number({ default: 0.5 })),
+    })
+  ),
+
   // Storage settings
   storage: Type.Optional(
     Type.Object({
@@ -74,8 +149,16 @@ export type WorkingMemoryConfig = Static<typeof workingMemoryConfigSchema>;
  * Default configuration
  */
 export const defaultConfig: WorkingMemoryConfig = {
+  embeddings: {
+    enabled: true,
+    provider: "openai",
+    model: "text-embedding-3-small",
+    dimensions: 1536,
+    ollamaBaseUrl: "http://localhost:11434",
+  },
   extraction: {
     enabled: true,
+    mode: "pattern",
     model: "claude-3-5-haiku-latest",
     provider: "anthropic",
   },
@@ -93,6 +176,18 @@ export const defaultConfig: WorkingMemoryConfig = {
   integrations: {
     defaultTtl: 300,
     refreshOnMention: true,
+  },
+  historyChunks: {
+    enabled: true,
+    maxChunks: 100,
+    summarizeAfterMessages: 10,
+    maxSummaryTokens: 500,
+  },
+  consolidation: {
+    enabled: false,
+    intervalHours: 24,
+    expireAfterDays: 30,
+    expireConfidenceThreshold: 0.5,
   },
   storage: {
     dbPath: "working-memory/state.db",

@@ -504,6 +504,73 @@ export class WorkingMemoryStore {
     };
   }
 
+  /**
+   * Update an existing chunk's embedding
+   */
+  async updateChunkEmbedding(id: string, embedding: Float32Array): Promise<void> {
+    if (!this.db) throw new Error("Database not initialized");
+
+    this.db
+      .prepare("UPDATE history_chunks SET embedding = ? WHERE id = ?")
+      .run(Buffer.from(embedding.buffer), id);
+  }
+
+  /**
+   * Get chunks that don't have embeddings yet
+   */
+  async getChunksWithoutEmbeddings(limit = 50): Promise<HistoryChunk[]> {
+    if (!this.db) throw new Error("Database not initialized");
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM history_chunks
+         WHERE embedding IS NULL
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(limit) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => this.rowToChunk(row));
+  }
+
+  /**
+   * Get chunks with embeddings for vector search
+   */
+  async getChunksWithEmbeddings(limit = 100): Promise<HistoryChunk[]> {
+    if (!this.db) throw new Error("Database not initialized");
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM history_chunks
+         WHERE embedding IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(limit) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => this.rowToChunk(row));
+  }
+
+  /**
+   * Delete old chunks beyond the limit
+   */
+  async pruneOldChunks(maxChunks: number): Promise<number> {
+    if (!this.db) throw new Error("Database not initialized");
+
+    const result = this.db
+      .prepare(
+        `DELETE FROM history_chunks
+         WHERE id NOT IN (
+           SELECT id FROM history_chunks
+           ORDER BY created_at DESC
+           LIMIT ?
+         )`
+      )
+      .run(maxChunks);
+
+    return result.changes;
+  }
+
   // ==========================================================================
   // Integration Cache (SQLite)
   // ==========================================================================

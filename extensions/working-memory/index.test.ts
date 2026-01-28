@@ -577,6 +577,194 @@ describe("integration cache", () => {
   });
 });
 
+// ============================================================================
+// Phase 2 Tests - Embeddings, Vector Store, History Chunks
+// ============================================================================
+
+describe("vector store", () => {
+  test("calculates cosine similarity correctly", async () => {
+    const { cosineSimilarity } = await import("./src/vector-store.js");
+
+    // Identical vectors should have similarity of 1
+    const v1 = new Float32Array([1, 0, 0]);
+    const v2 = new Float32Array([1, 0, 0]);
+    expect(cosineSimilarity(v1, v2)).toBeCloseTo(1.0);
+
+    // Orthogonal vectors should have similarity of 0
+    const v3 = new Float32Array([1, 0, 0]);
+    const v4 = new Float32Array([0, 1, 0]);
+    expect(cosineSimilarity(v3, v4)).toBeCloseTo(0.0);
+
+    // Opposite vectors should have similarity of -1
+    const v5 = new Float32Array([1, 0, 0]);
+    const v6 = new Float32Array([-1, 0, 0]);
+    expect(cosineSimilarity(v5, v6)).toBeCloseTo(-1.0);
+  });
+
+  test("normalizes vectors to unit length", async () => {
+    const { normalizeVector } = await import("./src/vector-store.js");
+
+    const v = new Float32Array([3, 4, 0]);
+    const normalized = normalizeVector(v);
+
+    // Check unit length
+    const length = Math.sqrt(
+      normalized[0] * normalized[0] +
+      normalized[1] * normalized[1] +
+      normalized[2] * normalized[2]
+    );
+    expect(length).toBeCloseTo(1.0);
+
+    // Check direction preserved
+    expect(normalized[0]).toBeCloseTo(0.6);
+    expect(normalized[1]).toBeCloseTo(0.8);
+    expect(normalized[2]).toBeCloseTo(0.0);
+  });
+
+  test("calculates euclidean distance correctly", async () => {
+    const { euclideanDistance } = await import("./src/vector-store.js");
+
+    const v1 = new Float32Array([0, 0, 0]);
+    const v2 = new Float32Array([3, 4, 0]);
+
+    expect(euclideanDistance(v1, v2)).toBeCloseTo(5.0);
+  });
+});
+
+describe("history chunk manager", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "moltbot-wm-chunks-"));
+  });
+
+  afterEach(async () => {
+    if (tmpDir) {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("creates chunks after message threshold", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { createHistoryChunkManager } = await import("./src/history-chunks.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    const manager = createHistoryChunkManager(store, null, null, {
+      enabled: true,
+      maxChunks: 100,
+      summarizeAfterMessages: 3, // Low threshold for testing
+      maxSummaryTokens: 500,
+    }, logger);
+
+    // Add messages below threshold
+    const chunk1 = await manager.processMessages([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there!" },
+    ]);
+    expect(chunk1).toBeNull(); // Not enough messages
+
+    // Add more messages to hit threshold
+    const chunk2 = await manager.processMessages([
+      { role: "user", content: "What can you do?" },
+    ]);
+    expect(chunk2).toBeDefined(); // Should create chunk now
+    expect(chunk2?.topic).toBeDefined();
+    expect(chunk2?.summary).toBeDefined();
+
+    await store.close();
+  });
+
+  test("extracts entities from messages", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { createHistoryChunkManager } = await import("./src/history-chunks.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    const manager = createHistoryChunkManager(store, null, null, {
+      enabled: true,
+      maxChunks: 100,
+      summarizeAfterMessages: 2,
+      maxSummaryTokens: 500,
+    }, logger);
+
+    const chunk = await manager.processMessages([
+      { role: "user", content: "Let's work on the Working Memory plugin for Moltbot" },
+      { role: "assistant", content: 'I\'ll help you build the "fact extraction" feature' },
+    ]);
+
+    expect(chunk).toBeDefined();
+    // Entity extraction finds capitalized words and quoted strings
+    expect(chunk?.entities).toContain("Moltbot");
+    expect(chunk?.entities).toContain("fact extraction");
+
+    await store.close();
+  });
+
+  test("flushes buffer on demand", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { createHistoryChunkManager } = await import("./src/history-chunks.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    const manager = createHistoryChunkManager(store, null, null, {
+      enabled: true,
+      maxChunks: 100,
+      summarizeAfterMessages: 10, // High threshold
+      maxSummaryTokens: 500,
+    }, logger);
+
+    // Add messages below threshold
+    await manager.processMessages([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi!" },
+    ]);
+
+    // Force flush
+    const chunk = await manager.flushBuffer("test-session");
+    expect(chunk).toBeDefined();
+    expect(manager.getBufferSize()).toBe(0);
+
+    await store.close();
+  });
+});
+
+describe("embeddings config", () => {
+  test("default config includes embeddings settings", async () => {
+    const { defaultConfig } = await import("./config.js");
+
+    expect(defaultConfig.embeddings).toBeDefined();
+    expect(defaultConfig.embeddings?.enabled).toBe(true);
+    expect(defaultConfig.embeddings?.provider).toBe("openai");
+    expect(defaultConfig.embeddings?.model).toBe("text-embedding-3-small");
+    expect(defaultConfig.embeddings?.dimensions).toBe(1536);
+  });
+
+  test("default config includes history chunks settings", async () => {
+    const { defaultConfig } = await import("./config.js");
+
+    expect(defaultConfig.historyChunks).toBeDefined();
+    expect(defaultConfig.historyChunks?.enabled).toBe(true);
+    expect(defaultConfig.historyChunks?.maxChunks).toBe(100);
+    expect(defaultConfig.historyChunks?.summarizeAfterMessages).toBe(10);
+  });
+
+  test("default config includes consolidation settings", async () => {
+    const { defaultConfig } = await import("./config.js");
+
+    expect(defaultConfig.consolidation).toBeDefined();
+    expect(defaultConfig.consolidation?.enabled).toBe(false); // Disabled by default
+    expect(defaultConfig.consolidation?.intervalHours).toBe(24);
+    expect(defaultConfig.consolidation?.expireAfterDays).toBe(30);
+  });
+});
+
 describe("context injector", () => {
   let tmpDir: string;
 
