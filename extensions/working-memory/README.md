@@ -322,8 +322,29 @@ Configure in moltbot.json:
 }
 ```
 
-### Phase 2.4: Consolidation (Planned)
+### Phase 2.4: Consolidation ✅
 
-- Periodic consolidation of duplicate facts
-- Expiration of old, low-confidence facts
-- Cross-session memory merging
+- **Periodic consolidation** of duplicate facts
+- **Expiration** of old, low-confidence facts
+- **Duplicate detection** using text similarity or embeddings
+- **Superseded fact tracking**
+
+```bash
+# Run consolidation manually
+moltbot wm consolidate
+
+# Check consolidation status
+moltbot wm consolidation-status
+```
+
+Configure in moltbot.json:
+```json
+{
+  "consolidation": {
+    "enabled": true,
+    "intervalHours": 24,
+    "expireAfterDays": 30,
+    "expireConfidenceThreshold": 0.5
+  }
+}
+```
