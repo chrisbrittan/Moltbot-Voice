@@ -421,6 +421,28 @@ const workingMemoryPlugin = {
             const count = await historyChunks.backfillEmbeddings(parseInt(opts.limit));
             console.log(`Backfilled ${count} embeddings`);
           });
+
+        wm.command("extraction-status")
+          .description("Show extraction mode and configuration")
+          .action(async () => {
+            console.log(
+              JSON.stringify(
+                {
+                  enabled: cfg.extraction?.enabled ?? true,
+                  mode: cfg.extraction?.mode ?? "pattern",
+                  model: cfg.extraction?.model ?? "claude-3-5-haiku-latest",
+                  provider: cfg.extraction?.provider ?? "anthropic",
+                  modes: {
+                    pattern: "Fast regex-based extraction (free, ~1ms)",
+                    llm: "LLM-based extraction using Haiku (~$0.001/turn, ~500ms)",
+                    hybrid: "Pattern first, LLM for complex cases",
+                  },
+                },
+                null,
+                2
+              )
+            );
+          });
       },
       { commands: ["wm"] }
     );

@@ -2,7 +2,12 @@
  * Fact Extractor
  *
  * Extracts facts, identity updates, and context updates from conversations.
- * Runs async after each agent turn using a cheap model (Haiku/GPT-4o-mini).
+ * Runs async after each agent turn.
+ *
+ * Supports three extraction modes:
+ * - pattern: Fast regex-based extraction (free, ~1ms)
+ * - llm: LLM-based extraction using Haiku (~$0.001/turn, ~500ms)
+ * - hybrid: Pattern first, LLM for complex cases
  */
 
 import type { WorkingMemoryStore } from "./store.js";
@@ -10,9 +15,17 @@ import type { IdentityManager } from "./identity.js";
 import type { ActiveContextManager } from "./active-context.js";
 import type { FactStore } from "./facts.js";
 import type { ExtractionResult, Logger } from "./types.js";
+import {
+  LLMExtractionService,
+  createLLMExtractionService,
+  type LLMExtractionResult,
+} from "./llm-extraction.js";
+
+export type ExtractionMode = "pattern" | "llm" | "hybrid";
 
 interface ExtractionConfig {
   enabled: boolean;
+  mode: ExtractionMode;
   model: string;
   provider: string;
 }
@@ -56,6 +69,8 @@ const PROJECT_PATTERNS = [
 ];
 
 export class FactExtractor {
+  private llmService: LLMExtractionService | null = null;
+
   constructor(
     private readonly store: WorkingMemoryStore,
     private readonly identity: IdentityManager,
@@ -63,7 +78,19 @@ export class FactExtractor {
     private readonly facts: FactStore,
     private readonly config: ExtractionConfig,
     private readonly logger: Logger
-  ) {}
+  ) {
+    // Initialize LLM service if using llm or hybrid mode
+    if (this.config.mode === "llm" || this.config.mode === "hybrid") {
+      this.llmService = createLLMExtractionService(
+        {
+          model: this.config.model,
+          provider: this.config.provider as "anthropic" | "openai",
+        },
+        this.logger
+      );
+      this.logger.info(`extraction: LLM mode enabled (${this.config.model})`);
+    }
+  }
 
   /**
    * Process a conversation to extract facts and updates.
@@ -96,23 +123,22 @@ export class FactExtractor {
       };
     }
 
-    const result: ExtractionResult = {
-      newFacts: [],
-      updatedFacts: [],
-      identityUpdates: null,
-      contextUpdates: null,
-    };
+    // Choose extraction method based on mode
+    let result: ExtractionResult;
 
-    // Process each message for patterns
-    for (const text of texts) {
-      // Check for fact patterns
-      await this.extractFacts(text, sessionKey, result);
+    switch (this.config.mode) {
+      case "llm":
+        result = await this.processWithLLM(messages, sessionKey);
+        break;
 
-      // Check for personality updates
-      await this.extractPersonalityUpdates(text, result);
+      case "hybrid":
+        result = await this.processHybrid(messages, texts, sessionKey);
+        break;
 
-      // Check for project/task context
-      await this.extractContextUpdates(text, result);
+      case "pattern":
+      default:
+        result = await this.processWithPatterns(texts, sessionKey);
+        break;
     }
 
     // Apply identity updates if found
@@ -140,10 +166,265 @@ export class FactExtractor {
     }
 
     if (result.newFacts.length > 0) {
-      this.logger.info(`extraction: extracted ${result.newFacts.length} new facts`);
+      this.logger.info(`extraction: extracted ${result.newFacts.length} new facts (mode: ${this.config.mode})`);
     }
 
     return result;
+  }
+
+  /**
+   * Process with pattern matching only (fast, free)
+   */
+  private async processWithPatterns(
+    texts: string[],
+    sessionKey: string | undefined
+  ): Promise<ExtractionResult> {
+    const result: ExtractionResult = {
+      newFacts: [],
+      updatedFacts: [],
+      identityUpdates: null,
+      contextUpdates: null,
+    };
+
+    for (const text of texts) {
+      await this.extractFacts(text, sessionKey, result);
+      await this.extractPersonalityUpdates(text, result);
+      await this.extractContextUpdates(text, result);
+    }
+
+    return result;
+  }
+
+  /**
+   * Process with LLM extraction (smarter, ~$0.001/turn)
+   */
+  private async processWithLLM(
+    messages: unknown[],
+    sessionKey: string | undefined
+  ): Promise<ExtractionResult> {
+    if (!this.llmService) {
+      this.logger.warn("extraction: LLM service not initialized, falling back to patterns");
+      return this.processWithPatterns(this.extractTexts(messages), sessionKey);
+    }
+
+    try {
+      // Format messages for LLM
+      const formattedMessages = this.formatMessagesForLLM(messages);
+      if (formattedMessages.length === 0) {
+        return {
+          newFacts: [],
+          updatedFacts: [],
+          identityUpdates: null,
+          contextUpdates: null,
+        };
+      }
+
+      // Call LLM extraction
+      const llmResult = await this.llmService.extract(formattedMessages);
+
+      // Convert LLM result to ExtractionResult
+      return this.convertLLMResult(llmResult, sessionKey);
+    } catch (err) {
+      this.logger.warn(`extraction: LLM extraction failed, falling back to patterns: ${String(err)}`);
+      return this.processWithPatterns(this.extractTexts(messages), sessionKey);
+    }
+  }
+
+  /**
+   * Hybrid mode: Pattern first, LLM for complex cases
+   */
+  private async processHybrid(
+    messages: unknown[],
+    texts: string[],
+    sessionKey: string | undefined
+  ): Promise<ExtractionResult> {
+    // First, try pattern extraction
+    const patternResult = await this.processWithPatterns(texts, sessionKey);
+
+    // Check if any text looks complex enough to warrant LLM
+    const needsLLM = texts.some((text) => {
+      // Complex if: long text, multiple sentences, or ambiguous patterns
+      if (text.length > 200) return true;
+      if (text.split(/[.!?]/).length > 3) return true;
+
+      // Check for content that patterns might miss
+      const hasComplexContent =
+        /\b(actually|but|however|although|instead|rather)\b/i.test(text) ||
+        /\b(mean|meant|saying|said)\b.*\b(that|is|was)\b/i.test(text);
+
+      return hasComplexContent && this.llmService?.hasExtractableContent(text);
+    });
+
+    if (!needsLLM || !this.llmService) {
+      return patternResult;
+    }
+
+    // Run LLM extraction
+    try {
+      const llmResult = await this.processWithLLM(messages, sessionKey);
+
+      // Merge results, preferring LLM for facts but keeping both
+      return this.mergeResults(patternResult, llmResult);
+    } catch {
+      return patternResult;
+    }
+  }
+
+  /**
+   * Format raw messages for LLM consumption
+   */
+  private formatMessagesForLLM(messages: unknown[]): Array<{ role: string; content: string }> {
+    const formatted: Array<{ role: string; content: string }> = [];
+
+    for (const msg of messages) {
+      if (!msg || typeof msg !== "object") continue;
+      const msgObj = msg as Record<string, unknown>;
+
+      const role = msgObj.role;
+      if (typeof role !== "string") continue;
+
+      const content = msgObj.content;
+      let contentStr = "";
+
+      if (typeof content === "string") {
+        contentStr = content;
+      } else if (Array.isArray(content)) {
+        // Extract text from content blocks
+        contentStr = content
+          .filter(
+            (block): block is { type: string; text: string } =>
+              typeof block === "object" &&
+              block !== null &&
+              "type" in block &&
+              (block as Record<string, unknown>).type === "text" &&
+              "text" in block
+          )
+          .map((block) => block.text)
+          .join("\n");
+      }
+
+      if (contentStr.trim()) {
+        formatted.push({ role, content: contentStr });
+      }
+    }
+
+    return formatted;
+  }
+
+  /**
+   * Convert LLM extraction result to ExtractionResult format
+   */
+  private async convertLLMResult(
+    llmResult: LLMExtractionResult,
+    sessionKey: string | undefined
+  ): Promise<ExtractionResult> {
+    const result: ExtractionResult = {
+      newFacts: [],
+      updatedFacts: [],
+      identityUpdates: null,
+      contextUpdates: null,
+    };
+
+    // Add facts from LLM
+    for (const fact of llmResult.facts) {
+      const { id, action } = await this.facts.addOrUpdate({
+        category: fact.category,
+        subject: fact.subject,
+        value: fact.value,
+        confidence: fact.confidence,
+        sourceSession: sessionKey,
+      });
+
+      if (action === "created") {
+        const storedFact = await this.facts.getFact(id);
+        if (storedFact) result.newFacts.push(storedFact);
+      } else {
+        const storedFact = await this.facts.getFact(id);
+        if (storedFact) result.updatedFacts.push(storedFact);
+      }
+    }
+
+    // Convert identity updates
+    if (
+      llmResult.identityUpdates.userName ||
+      llmResult.identityUpdates.userPreferences.length > 0 ||
+      llmResult.identityUpdates.personalityTone ||
+      llmResult.identityUpdates.personalityCommunicationStyle
+    ) {
+      result.identityUpdates = {
+        personality: llmResult.identityUpdates.personalityTone || llmResult.identityUpdates.personalityCommunicationStyle
+          ? {
+              tone: llmResult.identityUpdates.personalityTone ?? undefined,
+              communicationStyle: llmResult.identityUpdates.personalityCommunicationStyle ?? undefined,
+            }
+          : undefined,
+        user: llmResult.identityUpdates.userName || llmResult.identityUpdates.userPreferences.length > 0
+          ? {
+              name: llmResult.identityUpdates.userName ?? undefined,
+              preferences: llmResult.identityUpdates.userPreferences,
+            }
+          : undefined,
+      };
+    }
+
+    // Convert context updates
+    if (
+      llmResult.contextUpdates.projectName ||
+      llmResult.contextUpdates.taskDescription ||
+      llmResult.contextUpdates.decisions.length > 0
+    ) {
+      result.contextUpdates = {
+        currentProject: llmResult.contextUpdates.projectName
+          ? {
+              name: llmResult.contextUpdates.projectName,
+              goal: llmResult.contextUpdates.projectGoal ?? undefined,
+              startedAt: Date.now(),
+              status: "in_progress" as const,
+            }
+          : undefined,
+        currentTask: llmResult.contextUpdates.taskDescription
+          ? {
+              description: llmResult.contextUpdates.taskDescription,
+              filesInvolved: llmResult.contextUpdates.filesInvolved,
+              startedAt: Date.now(),
+            }
+          : undefined,
+      };
+
+      // Add decisions to active context
+      for (const decision of llmResult.contextUpdates.decisions) {
+        await this.activeContext.addDecision(decision);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Merge pattern and LLM results, deduplicating facts
+   */
+  private mergeResults(
+    patternResult: ExtractionResult,
+    llmResult: ExtractionResult
+  ): ExtractionResult {
+    // Start with LLM results (generally more accurate)
+    const merged: ExtractionResult = {
+      newFacts: [...llmResult.newFacts],
+      updatedFacts: [...llmResult.updatedFacts],
+      identityUpdates: llmResult.identityUpdates || patternResult.identityUpdates,
+      contextUpdates: llmResult.contextUpdates || patternResult.contextUpdates,
+    };
+
+    // Add pattern facts that aren't duplicates
+    const llmFactValues = new Set(merged.newFacts.map((f) => f.value.toLowerCase()));
+
+    for (const fact of patternResult.newFacts) {
+      if (!llmFactValues.has(fact.value.toLowerCase())) {
+        merged.newFacts.push(fact);
+      }
+    }
+
+    return merged;
   }
 
   /**

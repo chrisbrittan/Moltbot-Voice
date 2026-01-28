@@ -735,6 +735,44 @@ describe("history chunk manager", () => {
   });
 });
 
+describe("llm extraction", () => {
+  test("LLM extraction service can be created", async () => {
+    const { createLLMExtractionService } = await import("./src/llm-extraction.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {} };
+    const service = createLLMExtractionService(
+      { model: "claude-3-5-haiku-latest", provider: "anthropic" },
+      logger
+    );
+
+    expect(service).toBeDefined();
+  });
+
+  test("hasExtractableContent detects relevant patterns", async () => {
+    const { createLLMExtractionService } = await import("./src/llm-extraction.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {} };
+    const service = createLLMExtractionService({}, logger);
+
+    // Should detect extractable content
+    expect(service.hasExtractableContent("My name is Chris")).toBe(true);
+    expect(service.hasExtractableContent("I prefer dark mode")).toBe(true);
+    expect(service.hasExtractableContent("Let's work on the project")).toBe(true);
+    expect(service.hasExtractableContent("Remember to update the docs")).toBe(true);
+
+    // Should not detect non-extractable content
+    expect(service.hasExtractableContent("Hello")).toBe(false);
+    expect(service.hasExtractableContent("What time is it?")).toBe(false);
+  });
+
+  test("extraction config includes mode setting", async () => {
+    const { defaultConfig } = await import("./config.js");
+
+    expect(defaultConfig.extraction?.mode).toBe("pattern");
+    expect(defaultConfig.extraction?.model).toBe("claude-3-5-haiku-latest");
+  });
+});
+
 describe("embeddings config", () => {
   test("default config includes embeddings settings", async () => {
     const { defaultConfig } = await import("./config.js");
