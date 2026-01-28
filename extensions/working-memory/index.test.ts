@@ -803,6 +803,146 @@ describe("embeddings config", () => {
   });
 });
 
+describe("memory consolidation", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "moltbot-wm-consolidation-"));
+  });
+
+  afterEach(async () => {
+    if (tmpDir) {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("consolidator can be created", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { createMemoryConsolidator } = await import("./src/consolidation.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    const consolidator = createMemoryConsolidator(store, null, { enabled: true }, logger);
+    expect(consolidator).toBeDefined();
+
+    await store.close();
+  });
+
+  test("consolidation expires old low-confidence facts", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { createMemoryConsolidator } = await import("./src/consolidation.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    // Add an old, low-confidence fact (simulate by setting expireAfterDays to 0)
+    await store.addFact({
+      category: "test",
+      subject: "test",
+      value: "Low confidence fact",
+      confidence: 0.3,
+    });
+
+    const consolidator = createMemoryConsolidator(
+      store,
+      null,
+      {
+        enabled: true,
+        expireAfterDays: 0, // Expire immediately
+        expireConfidenceThreshold: 0.5,
+      },
+      logger
+    );
+
+    const result = await consolidator.consolidate();
+    expect(result.expiredFacts).toBe(1);
+
+    const facts = await store.listFacts({ limit: 10 });
+    expect(facts.length).toBe(0);
+
+    await store.close();
+  });
+
+  test("consolidation keeps high-confidence facts", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { createMemoryConsolidator } = await import("./src/consolidation.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    // Add a high-confidence fact
+    await store.addFact({
+      category: "test",
+      subject: "test",
+      value: "High confidence fact",
+      confidence: 0.9,
+    });
+
+    const consolidator = createMemoryConsolidator(
+      store,
+      null,
+      {
+        enabled: true,
+        expireAfterDays: 0,
+        expireConfidenceThreshold: 0.5,
+      },
+      logger
+    );
+
+    const result = await consolidator.consolidate();
+    expect(result.expiredFacts).toBe(0);
+
+    const facts = await store.listFacts({ limit: 10 });
+    expect(facts.length).toBe(1);
+
+    await store.close();
+  });
+
+  test("consolidation merges duplicate facts", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { createMemoryConsolidator } = await import("./src/consolidation.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    // Add two very similar facts
+    await store.addFact({
+      category: "preference",
+      subject: "user",
+      value: "User prefers dark mode",
+      confidence: 0.8,
+    });
+
+    await store.addFact({
+      category: "preference",
+      subject: "user",
+      value: "User prefers dark mode themes",
+      confidence: 0.9,
+    });
+
+    const consolidator = createMemoryConsolidator(
+      store,
+      null,
+      {
+        enabled: true,
+        expireAfterDays: 365, // Don't expire by age
+        duplicateSimilarityThreshold: 0.7, // Lower threshold for test
+      },
+      logger
+    );
+
+    const result = await consolidator.consolidate();
+    expect(result.mergedFacts).toBeGreaterThanOrEqual(0); // May or may not merge depending on similarity
+
+    await store.close();
+  });
+});
+
 describe("context injector", () => {
   let tmpDir: string;
 

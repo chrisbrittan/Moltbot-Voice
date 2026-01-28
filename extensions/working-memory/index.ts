@@ -29,6 +29,7 @@ import { registerGatewayMethods } from "./src/gateway.js";
 import { createEmbeddingService, type EmbeddingService } from "./src/embeddings.js";
 import { createVectorStore, type VectorStore } from "./src/vector-store.js";
 import { createHistoryChunkManager, type HistoryChunkManager } from "./src/history-chunks.js";
+import { createMemoryConsolidator, type MemoryConsolidator } from "./src/consolidation.js";
 
 // ============================================================================
 // Plugin Definition
@@ -93,6 +94,15 @@ const workingMemoryPlugin = {
 
       api.logger.info(
         `working-memory: history chunks enabled (summarize after ${cfg.historyChunks.summarizeAfterMessages} messages)`
+      );
+    }
+
+    // Initialize memory consolidator (Phase 2.4)
+    const consolidator = createMemoryConsolidator(store, embeddings, cfg.consolidation, api.logger);
+
+    if (cfg.consolidation?.enabled) {
+      api.logger.info(
+        `working-memory: consolidation enabled (every ${cfg.consolidation.intervalHours}h, expire after ${cfg.consolidation.expireAfterDays}d)`
       );
     }
 
@@ -437,6 +447,48 @@ const workingMemoryPlugin = {
                     llm: "LLM-based extraction using Haiku (~$0.001/turn, ~500ms)",
                     hybrid: "Pattern first, LLM for complex cases",
                   },
+                },
+                null,
+                2
+              )
+            );
+          });
+
+        wm.command("consolidate")
+          .description("Run memory consolidation (merge duplicates, expire old facts)")
+          .action(async () => {
+            await ensureInit();
+            console.log("Starting consolidation...");
+            const result = await consolidator.consolidate();
+            console.log(
+              JSON.stringify(
+                {
+                  status: "complete",
+                  duration: `${result.duration}ms`,
+                  mergedFacts: result.mergedFacts,
+                  expiredFacts: result.expiredFacts,
+                  supersededFacts: result.supersededFacts,
+                  prunedChunks: result.prunedChunks,
+                },
+                null,
+                2
+              )
+            );
+          });
+
+        wm.command("consolidation-status")
+          .description("Show consolidation configuration and status")
+          .action(async () => {
+            const nextRun = consolidator.getNextConsolidationTime();
+            console.log(
+              JSON.stringify(
+                {
+                  enabled: cfg.consolidation?.enabled ?? false,
+                  intervalHours: cfg.consolidation?.intervalHours ?? 24,
+                  expireAfterDays: cfg.consolidation?.expireAfterDays ?? 30,
+                  expireConfidenceThreshold: cfg.consolidation?.expireConfidenceThreshold ?? 0.5,
+                  isRunning: consolidator.isConsolidating(),
+                  nextRunAt: nextRun ? new Date(nextRun).toISOString() : null,
                 },
                 null,
                 2
