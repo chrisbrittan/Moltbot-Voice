@@ -233,7 +233,7 @@ struct SkillsNeedingAPIKeysBanner: View {
                     skill: skill,
                     apiKey: $model.apiKeyInput,
                     isSaving: model.isSaving,
-                    onSave: { await model.saveAPIKey() },
+                    onSave: { _ = await model.saveAPIKey() },
                     onCancel: { model.dismissPrompt() },
                     onSkip: { model.dismissPrompt() })
             }
