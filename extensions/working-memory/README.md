@@ -297,11 +297,30 @@ Data is stored in the agent directory:
 - Vector search retrieves chunks similar to current prompt
 - History chunks formatted with age indicators
 
-### Phase 2.3: LLM Extraction (Planned)
+### Phase 2.3: LLM Extraction ✅
 
-- Replace pattern matching with LLM-based fact extraction
-- Hybrid mode: pattern first, LLM for complex cases
-- Configurable extraction model (Haiku recommended)
+- **Three extraction modes**: pattern, llm, hybrid
+- **Pattern mode**: Fast regex-based (~1ms, free)
+- **LLM mode**: Haiku-based (~500ms, ~$0.001/turn)
+- **Hybrid mode**: Pattern first, LLM for complex cases
+- Uses prompts/extract-facts.md template
+- Robust JSON parsing with fallbacks
+- Automatic fallback on errors
+
+```bash
+# Check extraction mode
+moltbot wm extraction-status
+```
+
+Configure in moltbot.json:
+```json
+{
+  "extraction": {
+    "mode": "hybrid",
+    "model": "claude-3-5-haiku-latest"
+  }
+}
+```
 
 ### Phase 2.4: Consolidation (Planned)
 
