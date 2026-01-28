@@ -116,6 +116,9 @@ const workingMemoryPlugin = {
       if (!event.prompt) return;
 
       try {
+        // Ensure store is initialized before using injector
+        await store.initialize();
+
         const context = await injector.assembleContext({
           prompt: event.prompt,
           sessionKey: ctx.sessionKey,
@@ -144,6 +147,9 @@ const workingMemoryPlugin = {
       // Run extraction async - don't block the response
       setImmediate(async () => {
         try {
+          // Ensure store is initialized before extraction
+          await store.initialize();
+
           await extractor.processConversation({
             messages: event.messages,
             sessionKey: ctx.sessionKey,
@@ -203,6 +209,9 @@ const workingMemoryPlugin = {
           ),
         }),
         async execute(_toolCallId, params) {
+          // Ensure store is initialized
+          await store.initialize();
+
           const { project, task, decision } = params as {
             project?: { name: string; goal?: string };
             task?: { description: string; files?: string[] };
@@ -252,6 +261,9 @@ const workingMemoryPlugin = {
           subject: Type.Optional(Type.String({ description: "What/who this is about" })),
         }),
         async execute(_toolCallId, params) {
+          // Ensure store is initialized
+          await store.initialize();
+
           const { fact, category = "other", subject = "general" } = params as {
             fact: string;
             category?: string;
@@ -285,6 +297,9 @@ const workingMemoryPlugin = {
           limit: Type.Optional(Type.Number({ description: "Max results (default: 10)" })),
         }),
         async execute(_toolCallId, params) {
+          // Ensure store is initialized
+          await store.initialize();
+
           const { query, category, limit = 10 } = params as {
             query: string;
             category?: string;
