@@ -95,6 +95,10 @@ struct OnboardingView: View {
     @State var onboardingWizard = OnboardingWizardModel()
     @State var didLoadOnboardingSkills = false
     @State var localGatewayProbe: LocalGatewayProbe?
+
+    // Simplified onboarding state
+    @State var simplifiedUserName: String = ""
+    @State var simplifiedCommunicationStyle: String = "professional"
     @Bindable var state: AppState
     var permissionMonitor: PermissionMonitor
 
