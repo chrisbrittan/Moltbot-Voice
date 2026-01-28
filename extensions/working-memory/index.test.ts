@@ -265,6 +265,76 @@ describe("identity manager", () => {
 
     await store.close();
   });
+
+  test("uses Moltbot config for bot name when set", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { IdentityManager } = await import("./src/identity.js");
+    const { defaultConfig } = await import("./config.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    const identity = new IdentityManager(store, defaultConfig.identity!, logger);
+
+    // Set Moltbot identity (simulating config from moltbot.json)
+    identity.setMoltbotIdentity({
+      name: "Moltbot",
+      emoji: "🤖",
+      theme: "purple",
+    });
+
+    expect(identity.getBotName()).toBe("Moltbot");
+    expect(identity.getBotEmoji()).toBe("🤖");
+
+    // Check that formatted context uses Moltbot name
+    const formatted = await identity.formatForContext();
+    expect(formatted).toContain("Name: Moltbot 🤖");
+    expect(formatted).not.toContain("Name: Claude");
+
+    await store.close();
+  });
+
+  test("falls back to default name when Moltbot config not set", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { IdentityManager } = await import("./src/identity.js");
+    const { defaultConfig } = await import("./config.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    const identity = new IdentityManager(store, defaultConfig.identity!, logger);
+
+    // Don't set Moltbot identity
+    expect(identity.getBotName()).toBe("Assistant");
+    expect(identity.getBotEmoji()).toBeUndefined();
+
+    await store.close();
+  });
+
+  test("setUserName and setTone convenience methods work", async () => {
+    const { WorkingMemoryStore } = await import("./src/store.js");
+    const { IdentityManager } = await import("./src/identity.js");
+    const { defaultConfig } = await import("./config.js");
+
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    const store = new WorkingMemoryStore(tmpDir, logger);
+    await store.initialize();
+
+    const identity = new IdentityManager(store, defaultConfig.identity!, logger);
+
+    await identity.setUserName("Chris");
+    await identity.setTone("casual, friendly");
+    await identity.setCommunicationStyle("like chatting with a friend");
+
+    const current = await identity.get();
+    expect(current.user.name).toBe("Chris");
+    expect(current.personality.tone).toBe("casual, friendly");
+    expect(current.personality.communicationStyle).toBe("like chatting with a friend");
+
+    await store.close();
+  });
 });
 
 describe("fact store", () => {

@@ -82,6 +82,102 @@ export function registerGatewayMethods(
   }));
 
   // ==========================================================================
+  // Onboarding (for macOS/iOS app setup wizard)
+  // ==========================================================================
+
+  /**
+   * Set the user's name during onboarding.
+   * Called from "About You" screen in the simplified setup wizard.
+   */
+  api.registerGatewayMethod("working_memory.onboarding.set_user_name", wrapHandler(async (params) => {
+    const name = String(params.name ?? "").trim();
+    if (!name) throw new Error("name required");
+    await identity.setUserName(name);
+    return { success: true, name };
+  }));
+
+  /**
+   * Set the communication style/tone preference during onboarding.
+   * Called from "About You" screen in the simplified setup wizard.
+   *
+   * Tone options (plain English names used in UI):
+   * - "casual" → "Casual & friendly"
+   * - "professional" → "Professional"
+   * - "warm" → "Warm & supportive"
+   */
+  api.registerGatewayMethod("working_memory.onboarding.set_tone", wrapHandler(async (params) => {
+    const tone = String(params.tone ?? "").trim();
+    if (!tone) throw new Error("tone required");
+
+    // Map plain names to communication styles
+    const toneMap: Record<string, { tone: string; style: string }> = {
+      casual: { tone: "casual, friendly", style: "conversational, like chatting with a friend" },
+      professional: { tone: "professional, clear", style: "direct and to the point" },
+      warm: { tone: "warm, supportive", style: "encouraging and patient" },
+    };
+
+    const mapping = toneMap[tone] ?? { tone, style: tone };
+    await identity.setTone(mapping.tone);
+    await identity.setCommunicationStyle(mapping.style);
+
+    return { success: true, tone: mapping.tone, style: mapping.style };
+  }));
+
+  /**
+   * Complete onboarding setup in one call.
+   * Called at the end of the simplified setup wizard.
+   */
+  api.registerGatewayMethod("working_memory.onboarding.complete", wrapHandler(async (params) => {
+    const name = params.name ? String(params.name).trim() : undefined;
+    const tone = params.tone ? String(params.tone).trim() : undefined;
+
+    const updates: string[] = [];
+
+    if (name) {
+      await identity.setUserName(name);
+      updates.push(`name: ${name}`);
+    }
+
+    if (tone) {
+      const toneMap: Record<string, { tone: string; style: string }> = {
+        casual: { tone: "casual, friendly", style: "conversational, like chatting with a friend" },
+        professional: { tone: "professional, clear", style: "direct and to the point" },
+        warm: { tone: "warm, supportive", style: "encouraging and patient" },
+      };
+
+      const mapping = toneMap[tone] ?? { tone, style: tone };
+      await identity.setTone(mapping.tone);
+      await identity.setCommunicationStyle(mapping.style);
+      updates.push(`tone: ${mapping.tone}`);
+    }
+
+    // Mark onboarding as complete by adding a fact
+    await facts.addFact({
+      category: "user",
+      subject: "onboarding",
+      value: "Onboarding completed",
+      confidence: 1.0,
+    });
+
+    return {
+      success: true,
+      updates,
+      identity: await identity.get(),
+    };
+  }));
+
+  /**
+   * Get the bot's current display name (from Moltbot config or fallback).
+   * Used by macOS app to show "Meet [BotName]" on the Done screen.
+   */
+  api.registerGatewayMethod("working_memory.onboarding.get_bot_name", wrapHandler(async () => {
+    return {
+      name: identity.getBotName(),
+      emoji: identity.getBotEmoji(),
+    };
+  }));
+
+  // ==========================================================================
   // Active Context
   // ==========================================================================
 

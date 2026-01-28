@@ -3,6 +3,10 @@
  *
  * Manages PA personality and user profile.
  * Supports chat-driven updates (user says "be more casual" → personality updates).
+ *
+ * Identity is split into two parts:
+ * - Bot identity (name, emoji) comes from Moltbot config
+ * - User identity (name, preferences, tone) stored in Working Memory
  */
 
 import type { WorkingMemoryStore } from "./store.js";
@@ -13,12 +17,49 @@ interface IdentityConfig {
   lockedTraits: string[];
 }
 
+/**
+ * Moltbot's agent identity from config (bot name, emoji, avatar)
+ */
+export interface MoltbotIdentityConfig {
+  name?: string;
+  emoji?: string;
+  avatar?: string;
+  theme?: string;
+}
+
 export class IdentityManager {
+  private moltbotIdentity: MoltbotIdentityConfig | null = null;
+
   constructor(
     private readonly store: WorkingMemoryStore,
     private readonly config: IdentityConfig,
     private readonly logger: Logger
   ) {}
+
+  /**
+   * Set the Moltbot identity config (bot name, emoji from moltbot.json).
+   * This is called during plugin initialization.
+   */
+  setMoltbotIdentity(identity: MoltbotIdentityConfig | null): void {
+    this.moltbotIdentity = identity;
+    if (identity?.name) {
+      this.logger.info(`identity: using bot name from Moltbot config: ${identity.name}`);
+    }
+  }
+
+  /**
+   * Get the bot's display name (from Moltbot config, or fallback to Working Memory)
+   */
+  getBotName(): string {
+    return this.moltbotIdentity?.name ?? "Assistant";
+  }
+
+  /**
+   * Get the bot's emoji (from Moltbot config)
+   */
+  getBotEmoji(): string | undefined {
+    return this.moltbotIdentity?.emoji;
+  }
 
   // ==========================================================================
   // Read Operations
@@ -190,6 +231,7 @@ export class IdentityManager {
 
   /**
    * Format identity for injection into agent context.
+   * Bot name comes from Moltbot config, everything else from Working Memory.
    */
   async formatForContext(): Promise<string> {
     const identity = await this.get();
@@ -197,9 +239,13 @@ export class IdentityManager {
 
     const sections: string[] = [];
 
-    // Personality section
+    // Bot personality section
+    // Name comes from Moltbot config (if set), fallback to Working Memory
+    const botName = this.moltbotIdentity?.name ?? personality.name;
+    const botEmoji = this.moltbotIdentity?.emoji;
+
     sections.push(`<personality>`);
-    sections.push(`Name: ${personality.name}`);
+    sections.push(`Name: ${botName}${botEmoji ? ` ${botEmoji}` : ""}`);
     sections.push(`Tone: ${personality.tone}`);
     sections.push(`Communication Style: ${personality.communicationStyle}`);
     if (personality.quirks.length > 0) {

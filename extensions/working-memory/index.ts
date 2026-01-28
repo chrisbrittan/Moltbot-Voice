@@ -65,6 +65,19 @@ const workingMemoryPlugin = {
     const store = new WorkingMemoryStore(storagePath, api.logger);
     const identity = new IdentityManager(store, cfg.identity!, api.logger);
     const activeContext = new ActiveContextManager(store, api.logger);
+
+    // Pass Moltbot's agent identity to the IdentityManager
+    // This allows Working Memory to use the bot name/emoji from Moltbot config
+    const agentList = api.config.agents?.list;
+    const defaultAgent = agentList?.find((a) => a.default) ?? agentList?.[0];
+    if (defaultAgent?.identity) {
+      identity.setMoltbotIdentity({
+        name: defaultAgent.identity.name,
+        emoji: defaultAgent.identity.emoji,
+        avatar: defaultAgent.identity.avatar,
+        theme: defaultAgent.identity.theme,
+      });
+    }
     const facts = new FactStore(store, api.logger);
     const integrations = new IntegrationCache(store, cfg.integrations!, api.logger);
     const injector = new ContextInjector(identity, activeContext, facts, integrations, cfg.injection!, api.logger);
