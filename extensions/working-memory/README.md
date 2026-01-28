@@ -53,6 +53,17 @@ moltbot wm facts --limit 20
 # Search facts
 moltbot wm search "typescript"
 
+# List recent history chunks (Phase 2)
+moltbot wm chunks
+moltbot wm chunks --limit 20
+
+# Check embeddings status (Phase 2)
+moltbot wm embeddings-status
+
+# Generate embeddings for chunks that don't have them (Phase 2)
+moltbot wm backfill-embeddings
+moltbot wm backfill-embeddings --limit 100
+
 # Reset all data (dangerous!)
 moltbot wm reset --confirm
 ```
@@ -118,8 +129,18 @@ Users can update the assistant's personality through conversation:
       "working-memory": {
         "enabled": true,
         "config": {
+          "embeddings": {
+            "enabled": true,
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "dimensions": 1536,
+            "ollamaBaseUrl": "http://localhost:11434",
+            "fallbackProvider": "ollama",
+            "fallbackModel": "nomic-embed-text"
+          },
           "extraction": {
             "enabled": true,
+            "mode": "pattern",
             "model": "claude-3-5-haiku-latest"
           },
           "identity": {
@@ -130,11 +151,24 @@ Users can update the assistant's personality through conversation:
             "identityTokens": 1500,
             "activeContextTokens": 1000,
             "factsTokens": 1000,
-            "integrationTokens": 1000
+            "integrationTokens": 1000,
+            "historyChunksTokens": 2000
           },
           "integrations": {
             "defaultTtl": 300,
             "refreshOnMention": true
+          },
+          "historyChunks": {
+            "enabled": true,
+            "maxChunks": 100,
+            "summarizeAfterMessages": 10,
+            "maxSummaryTokens": 500
+          },
+          "consolidation": {
+            "enabled": false,
+            "intervalHours": 24,
+            "expireAfterDays": 30,
+            "expireConfidenceThreshold": 0.5
           },
           "storage": {
             "dbPath": "working-memory"
@@ -145,6 +179,16 @@ Users can update the assistant's personality through conversation:
   }
 }
 ```
+
+### Embedding Providers
+
+| Provider | Model | Dimensions | Cost | Notes |
+|----------|-------|------------|------|-------|
+| OpenAI | text-embedding-3-small | 1536 | $0.02/1M | Default, best quality/cost |
+| OpenAI | text-embedding-3-large | 3072 | $0.13/1M | Higher quality |
+| Ollama | nomic-embed-text | 768 | Free | Local, offline capable |
+
+Set `OPENAI_API_KEY` environment variable for OpenAI embeddings.
 
 ## Gateway Methods (for iOS/External Apps)
 
@@ -206,24 +250,61 @@ Data is stored in the agent directory:
 ├─────────────────────────────────────────────────────────────┤
 │  Hooks                                                       │
 │  ├── before_agent_start → Context Injection                 │
-│  └── agent_end → Fact Extraction (async)                    │
+│  │   └── Semantic history retrieval (via embeddings)        │
+│  └── agent_end → Fact Extraction + History Chunks (async)   │
 ├─────────────────────────────────────────────────────────────┤
-│  Managers                                                    │
+│  Phase 1 Managers                                            │
 │  ├── IdentityManager      (personality, user profile)       │
 │  ├── ActiveContextManager (project, task, decisions)        │
 │  ├── FactStore           (CRUD, FTS search)                 │
 │  └── IntegrationCache    (TTL-based caching)                │
 ├─────────────────────────────────────────────────────────────┤
+│  Phase 2 Components                                          │
+│  ├── EmbeddingService    (OpenAI/Ollama embeddings)         │
+│  ├── VectorStore         (cosine similarity search)         │
+│  └── HistoryChunkManager (conversation summarization)       │
+├─────────────────────────────────────────────────────────────┤
 │  Storage                                                     │
-│  ├── SQLite              (facts, chunks, integrations)      │
+│  ├── SQLite              (facts, chunks+embeddings, cache)  │
 │  └── JSON Files          (identity, active-context)         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Future: Phase 2
+## Phase 2 Features
 
-Planned enhancements:
-- Semantic history chunks with embeddings
-- Vector search for relevant context
-- LLM-based fact extraction (vs pattern matching)
-- Cross-session memory consolidation
+### Phase 2.1: Embeddings Infrastructure ✅
+
+- **EmbeddingService**: Generate embeddings via OpenAI or Ollama
+  - OpenAI `text-embedding-3-small` (default)
+  - Ollama fallback for offline use
+  - In-memory caching with TTL
+  - Batch embedding support
+
+- **VectorStore**: Semantic similarity search
+  - Cosine similarity calculation
+  - Configurable similarity threshold
+  - Automatic index management
+
+- **HistoryChunkManager**: Conversation summarization
+  - Automatic chunking after N messages
+  - Entity extraction from conversations
+  - Embedding generation for chunks
+  - Pruning of old chunks
+
+### Phase 2.2: Semantic History (In Progress)
+
+- Context injection includes semantically relevant history
+- Vector search retrieves chunks similar to current prompt
+- History chunks formatted with age indicators
+
+### Phase 2.3: LLM Extraction (Planned)
+
+- Replace pattern matching with LLM-based fact extraction
+- Hybrid mode: pattern first, LLM for complex cases
+- Configurable extraction model (Haiku recommended)
+
+### Phase 2.4: Consolidation (Planned)
+
+- Periodic consolidation of duplicate facts
+- Expiration of old, low-confidence facts
+- Cross-session memory merging
