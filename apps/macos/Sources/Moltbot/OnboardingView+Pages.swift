@@ -7,25 +7,30 @@ import SwiftUI
 extension OnboardingView {
     @ViewBuilder
     func pageView(for pageIndex: Int) -> some View {
-        switch pageIndex {
-        case 0:
-            self.welcomePage()
-        case 1:
-            self.connectionPage()
-        case 2:
-            self.anthropicAuthPage()
-        case 3:
-            self.wizardPage()
-        case 5:
-            self.permissionsPage()
-        case 6:
-            self.cliPage()
-        case 8:
-            self.onboardingChatPage()
-        case 9:
-            self.readyPage()
-        default:
-            EmptyView()
+        // Handle simplified onboarding pages (100+)
+        if pageIndex >= 100 {
+            self.simplifiedPageView(for: pageIndex)
+        } else {
+            switch pageIndex {
+            case 0:
+                self.welcomePage()
+            case 1:
+                self.connectionPage()
+            case 2:
+                self.anthropicAuthPage()
+            case 3:
+                self.wizardPage()
+            case 5:
+                self.permissionsPage()
+            case 6:
+                self.cliPage()
+            case 8:
+                self.onboardingChatPage()
+            case 9:
+                self.readyPage()
+            default:
+                EmptyView()
+            }
         }
     }
 

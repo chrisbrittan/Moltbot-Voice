@@ -97,6 +97,7 @@ struct OnboardingView: View {
     @State var localGatewayProbe: LocalGatewayProbe?
 
     // Simplified onboarding state
+    @State var useSimplifiedOnboarding: Bool = true
     @State var simplifiedUserName: String = ""
     @State var simplifiedCommunicationStyle: String = "professional"
     @Bindable var state: AppState
@@ -143,7 +144,10 @@ struct OnboardingView: View {
     }
 
     var pageOrder: [Int] {
-        Self.pageOrder(for: self.state.connectionMode, showOnboardingChat: self.showOnboardingChat)
+        if self.useSimplifiedOnboarding {
+            return Self.simplifiedPageOrder
+        }
+        return Self.pageOrder(for: self.state.connectionMode, showOnboardingChat: self.showOnboardingChat)
     }
 
     var pageCount: Int { self.pageOrder.count }

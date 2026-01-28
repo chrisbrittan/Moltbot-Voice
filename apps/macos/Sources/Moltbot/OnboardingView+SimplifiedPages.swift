@@ -125,6 +125,34 @@ extension OnboardingView {
                         startAnthropicOAuth()
                     }
 
+                    // OAuth code input (shows after clicking authorize)
+                    if anthropicAuthPKCE != nil && !anthropicAuthVerified {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Paste the code from your browser:")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            HStack(spacing: 8) {
+                                TextField("code#state", text: $anthropicAuthCode)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.body, design: .monospaced))
+
+                                Button("Connect") {
+                                    Task { await finishAnthropicOAuth() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(anthropicAuthCode.isEmpty || anthropicAuthBusy)
+                            }
+
+                            if let status = anthropicAuthStatus {
+                                Text(status)
+                                    .font(.caption)
+                                    .foregroundStyle(status.contains("fail") ? .red : .secondary)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+
                     // ChatGPT
                     signInProviderButton(
                         title: "Continue with ChatGPT",
