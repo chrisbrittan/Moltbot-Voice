@@ -40,6 +40,12 @@ const normalizePluginEntries = (entries: unknown): NormalizedPluginsConfig["entr
       continue;
     }
     const entry = value as Record<string, unknown>;
+    // Debug: log working-memory entry normalization
+    if (key === "working-memory") {
+      console.log(
+        `[DEBUG] normalizePluginEntries: key=${key}, entry.config=${JSON.stringify(entry.config)}, "config" in entry=${"config" in entry}`,
+      );
+    }
     normalized[key] = {
       enabled: typeof entry.enabled === "boolean" ? entry.enabled : undefined,
       config: "config" in entry ? entry.config : undefined,
