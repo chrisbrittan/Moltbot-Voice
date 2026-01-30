@@ -359,6 +359,13 @@ export function loadMoltbotPlugins(options: PluginLoadOptions = {}): PluginRegis
       selectedMemoryPluginId = record.id;
     }
 
+    // Debug: log plugin config lookup
+    if (pluginId === "working-memory") {
+      logger.info(
+        `[plugins] ${pluginId} entry=${JSON.stringify(entry)}, entry?.config=${JSON.stringify(entry?.config)}`,
+      );
+    }
+
     const validatedConfig = validatePluginConfig({
       schema: manifestRecord.configSchema,
       cacheKey: manifestRecord.schemaCacheKey,
