@@ -1,4 +1,16 @@
 import { detectMime } from "../media/mime.js";
+import {
+  extractFileContentFromSource,
+  DEFAULT_INPUT_FILE_MIMES,
+  DEFAULT_INPUT_FILE_MAX_BYTES,
+  DEFAULT_INPUT_FILE_MAX_CHARS,
+  DEFAULT_INPUT_PDF_MAX_PAGES,
+  DEFAULT_INPUT_PDF_MAX_PIXELS,
+  DEFAULT_INPUT_PDF_MIN_TEXT_CHARS,
+  DEFAULT_INPUT_MAX_REDIRECTS,
+  DEFAULT_INPUT_TIMEOUT_MS,
+  type InputFileLimits,
+} from "../media/input-files.js";
 
 export type ChatAttachment = {
   type?: string;
@@ -13,10 +25,13 @@ export type ChatImageContent = {
   mimeType: string;
 };
 
-export type ParsedMessageWithImages = {
+export type ParsedMessageWithAttachments = {
   message: string;
   images: ChatImageContent[];
 };
+
+/** @deprecated Use ParsedMessageWithAttachments */
+export type ParsedMessageWithImages = ParsedMessageWithAttachments;
 
 type AttachmentLog = {
   warn: (message: string) => void;
@@ -26,6 +41,10 @@ function normalizeMime(mime?: string): string | undefined {
   if (!mime) return undefined;
   const cleaned = mime.split(";")[0]?.trim().toLowerCase();
   return cleaned || undefined;
+}
+
+function isPdfMime(mime?: string): boolean {
+  return mime === "application/pdf";
 }
 
 async function sniffMimeFromBase64(base64: string): Promise<string | undefined> {
@@ -49,15 +68,19 @@ function isImageMime(mime?: string): boolean {
 }
 
 /**
- * Parse attachments and extract images as structured content blocks.
- * Returns the message text and an array of image content blocks
+ * Parse attachments and extract images/documents as structured content blocks.
+ * Returns the message text (with PDF text prepended) and an array of image content blocks
  * compatible with Claude API's image format.
+ *
+ * Supports:
+ * - Images (JPEG, PNG, GIF, WebP) - returned as image content blocks
+ * - PDFs - text extracted and prepended to message, pages rendered as images if text-light
  */
 export async function parseMessageWithAttachments(
   message: string,
   attachments: ChatAttachment[] | undefined,
   opts?: { maxBytes?: number; log?: AttachmentLog },
-): Promise<ParsedMessageWithImages> {
+): Promise<ParsedMessageWithAttachments> {
   const maxBytes = opts?.maxBytes ?? 5_000_000; // 5 MB
   const log = opts?.log;
   if (!attachments || attachments.length === 0) {
@@ -65,6 +88,22 @@ export async function parseMessageWithAttachments(
   }
 
   const images: ChatImageContent[] = [];
+  const extractedTexts: string[] = [];
+
+  // Build limits for PDF extraction
+  const fileLimits: InputFileLimits = {
+    maxBytes: maxBytes,
+    maxChars: DEFAULT_INPUT_FILE_MAX_CHARS,
+    allowedMimes: new Set([...DEFAULT_INPUT_FILE_MIMES, "application/pdf"]),
+    allowUrl: false,
+    timeoutMs: DEFAULT_INPUT_TIMEOUT_MS,
+    maxRedirects: DEFAULT_INPUT_MAX_REDIRECTS,
+    pdf: {
+      maxPages: DEFAULT_INPUT_PDF_MAX_PAGES,
+      maxPixels: DEFAULT_INPUT_PDF_MAX_PIXELS,
+      minTextChars: DEFAULT_INPUT_PDF_MIN_TEXT_CHARS,
+    },
+  };
 
   for (const [idx, att] of attachments.entries()) {
     if (!att) continue;
@@ -98,12 +137,51 @@ export async function parseMessageWithAttachments(
 
     const providedMime = normalizeMime(mime);
     const sniffedMime = normalizeMime(await sniffMimeFromBase64(b64));
+    const effectiveMime = sniffedMime ?? providedMime;
+
+    // Handle PDFs
+    if (isPdfMime(effectiveMime)) {
+      log?.warn(`attachment ${label}: processing PDF`);
+      try {
+        const result = await extractFileContentFromSource({
+          source: {
+            type: "base64",
+            data: b64,
+            mediaType: "application/pdf",
+            filename: att.fileName || label,
+          },
+          limits: fileLimits,
+        });
+
+        // Add extracted text
+        if (result.text?.trim()) {
+          extractedTexts.push(`[PDF: ${label}]\n${result.text}`);
+        }
+
+        // Add rendered page images if available
+        if (result.images) {
+          for (const img of result.images) {
+            images.push({
+              type: "image",
+              data: img.data,
+              mimeType: img.mimeType,
+            });
+          }
+        }
+      } catch (err) {
+        log?.warn(`attachment ${label}: PDF extraction failed: ${String(err)}`);
+        throw new Error(`attachment ${label}: failed to process PDF - ${String(err)}`);
+      }
+      continue;
+    }
+
+    // Handle images
     if (sniffedMime && !isImageMime(sniffedMime)) {
-      log?.warn(`attachment ${label}: detected non-image (${sniffedMime}), dropping`);
+      log?.warn(`attachment ${label}: detected non-image/non-PDF (${sniffedMime}), dropping`);
       continue;
     }
     if (!sniffedMime && !isImageMime(providedMime)) {
-      log?.warn(`attachment ${label}: unable to detect image mime type, dropping`);
+      log?.warn(`attachment ${label}: unable to detect mime type, dropping`);
       continue;
     }
     if (sniffedMime && providedMime && sniffedMime !== providedMime) {
@@ -119,7 +197,14 @@ export async function parseMessageWithAttachments(
     });
   }
 
-  return { message, images };
+  // Prepend extracted PDF text to message
+  let finalMessage = message;
+  if (extractedTexts.length > 0) {
+    const pdfContent = extractedTexts.join("\n\n---\n\n");
+    finalMessage = message.trim() ? `${pdfContent}\n\n---\n\nUser message: ${message}` : pdfContent;
+  }
+
+  return { message: finalMessage, images };
 }
 
 /**
