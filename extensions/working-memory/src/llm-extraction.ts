@@ -18,6 +18,7 @@ export interface LLMExtractionConfig {
   model: string;
   provider: "anthropic" | "openai";
   maxTokens?: number;
+  apiKey?: string;
 }
 
 export interface ExtractedFact {
@@ -142,9 +143,9 @@ export class LLMExtractionService {
   }
 
   private async callAnthropic(prompt: string): Promise<string> {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = this.config.apiKey || process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
-      throw new Error("ANTHROPIC_API_KEY environment variable is not set");
+      throw new Error("Anthropic API key not provided in config and ANTHROPIC_API_KEY environment variable is not set");
     }
 
     const messages: AnthropicMessage[] = [
@@ -322,6 +323,7 @@ export function createLLMExtractionService(
     model: config?.model ?? "claude-3-5-haiku-latest",
     provider: config?.provider ?? "anthropic",
     maxTokens: config?.maxTokens ?? 1024,
+    apiKey: config?.apiKey,
   };
 
   return new LLMExtractionService(

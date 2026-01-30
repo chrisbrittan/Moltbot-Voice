@@ -28,6 +28,7 @@ interface ExtractionConfig {
   mode: ExtractionMode;
   model: string;
   provider: string;
+  apiKey?: string;
 }
 
 // Patterns that indicate extractable content
@@ -85,10 +86,11 @@ export class FactExtractor {
         {
           model: this.config.model,
           provider: this.config.provider as "anthropic" | "openai",
+          apiKey: this.config.apiKey,
         },
         this.logger
       );
-      this.logger.info(`extraction: LLM mode enabled (${this.config.model})`);
+      this.logger.info(`extraction: LLM mode enabled (${this.config.model}, apiKey: ${this.config.apiKey ? "provided" : "from env"})`);
     }
   }
 

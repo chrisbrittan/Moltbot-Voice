@@ -73,6 +73,11 @@ export const workingMemoryConfigSchema = Type.Object({
           default: "anthropic",
         })
       ),
+      apiKey: Type.Optional(
+        Type.String({
+          description: "API key for extraction provider (falls back to ANTHROPIC_API_KEY env var)",
+        })
+      ),
     })
   ),
 

@@ -58,6 +58,17 @@ const workingMemoryPlugin = {
       storage: { ...defaultConfig.storage, ...userConfig?.storage },
     };
 
+    // Resolve API key for LLM extraction from main config if not provided
+    if (cfg.extraction && (cfg.extraction.mode === "llm" || cfg.extraction.mode === "hybrid") && !cfg.extraction.apiKey) {
+      const provider = cfg.extraction.provider ?? "anthropic";
+      // Try to get API key from models.providers config
+      const providerConfig = api.config.models?.providers?.[provider] as { apiKey?: string } | undefined;
+      if (providerConfig?.apiKey) {
+        cfg.extraction.apiKey = providerConfig.apiKey;
+        api.logger.info(`working-memory: using ${provider} API key from models.providers config`);
+      }
+    }
+
     // Resolve storage path
     const storagePath = api.resolvePath(cfg.storage?.dbPath ?? "working-memory");
 
