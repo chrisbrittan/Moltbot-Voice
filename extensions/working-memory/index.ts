@@ -45,6 +45,7 @@ const workingMemoryPlugin = {
   register(api: MoltbotPluginApi) {
     // Parse and merge config with defaults
     const userConfig = api.pluginConfig as Partial<WorkingMemoryConfig>;
+    api.logger.info(`working-memory: userConfig.extraction = ${JSON.stringify(userConfig?.extraction)}`);
     const cfg: WorkingMemoryConfig = {
       ...defaultConfig,
       ...userConfig,
