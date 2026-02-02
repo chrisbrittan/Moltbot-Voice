@@ -58,24 +58,13 @@ function buildUserIdentitySection(ownerLine: string | undefined, isMinimal: bool
 }
 
 function buildTimeSection(params: { userTimezone?: string }) {
-  if (!params.userTimezone) {
-    return [];
-  }
-  const now = new Date();
-  const formatted = now.toLocaleString("en-GB", {
-    timeZone: params.userTimezone,
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  });
+  if (!params.userTimezone) return [];
+  // The system prompt intentionally excludes the current date/time for cache stability.
+  // Instead, hint to use session_status tool. See: #1897, #3658
   return [
     "## Current Date & Time",
     `Time zone: ${params.userTimezone}`,
-    `Current: ${formatted}`,
+    "If you need the current date, time, or day of week, use the session_status tool.",
     "",
   ];
 }
