@@ -130,6 +130,10 @@ export function formatZonedTimestamp(date: Date, timeZone?: string): string | un
   return `${yyyy}-${mm}-${dd} ${hh}:${min}${tz ? ` ${tz}` : ""}`;
 }
 
+function formatWeekday(date: Date, timeZone?: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(date);
+}
+
 function formatTimestamp(
   ts: number | Date | undefined,
   options?: EnvelopeFormatOptions,
@@ -146,13 +150,19 @@ function formatTimestamp(
     return undefined;
   }
   const zone = resolveEnvelopeTimezone(resolved);
+  // Include 3-letter weekday for better date awareness (agents can't reliably derive day-of-week)
   if (zone.mode === "utc") {
-    return formatUtcTimestamp(date);
+    const dow = formatWeekday(date, "UTC");
+    return `${dow} ${formatUtcTimestamp(date)}`;
   }
   if (zone.mode === "local") {
-    return formatZonedTimestamp(date);
+    const dow = formatWeekday(date);
+    const formatted = formatZonedTimestamp(date);
+    return formatted ? `${dow} ${formatted}` : undefined;
   }
-  return formatZonedTimestamp(date, zone.timeZone);
+  const dow = formatWeekday(date, zone.timeZone);
+  const formatted = formatZonedTimestamp(date, zone.timeZone);
+  return formatted ? `${dow} ${formatted}` : undefined;
 }
 
 function formatElapsedTime(currentMs: number, previousMs: number): string | undefined {
