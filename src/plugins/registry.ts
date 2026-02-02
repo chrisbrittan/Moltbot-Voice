@@ -30,7 +30,7 @@ import type {
   PluginHookRegistration as TypedPluginHookRegistration,
 } from "./types.js";
 import { registerInternalHook } from "../hooks/internal-hooks.js";
-import { resolveUserPath } from "../utils.js";
+import { resolveUserPath, CONFIG_DIR } from "../utils.js";
 import { registerPluginCommand } from "./commands.js";
 import { normalizePluginHttpPath } from "./http-path.js";
 
@@ -493,7 +493,16 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       registerCli: (registrar, opts) => registerCli(record, registrar, opts),
       registerService: (service) => registerService(record, service),
       registerCommand: (command) => registerCommand(record, command),
-      resolvePath: (input: string) => resolveUserPath(input),
+      resolvePath: (input: string) => {
+        const trimmed = input.trim();
+        if (!trimmed) return trimmed;
+        // Absolute paths or ~ paths: resolve as-is
+        if (trimmed.startsWith("/") || trimmed.startsWith("~")) {
+          return resolveUserPath(trimmed);
+        }
+        // Relative paths: resolve within the state directory (CONFIG_DIR)
+        return path.join(CONFIG_DIR, trimmed);
+      },
       on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),
     };
   };

@@ -383,6 +383,15 @@ export class WorkingMemoryStore {
   async searchFacts(query: string, options: { category?: string; limit?: number } = {}): Promise<Fact[]> {
     if (!this.db) throw new Error("Database not initialized");
 
+    // Sanitize query for FTS5 - escape special characters
+    // FTS5 special chars: " * ( ) : ^ - [ ] + AND OR NOT NEAR
+    const sanitizedQuery = this.sanitizeFtsQuery(query);
+
+    // If query is empty after sanitization, fall back to recent facts
+    if (!sanitizedQuery.trim()) {
+      return this.getRecentFacts(options.limit ?? 10);
+    }
+
     // Use FTS for search
     let sql = `
       SELECT facts.*, bm25(facts_fts) as rank
@@ -390,7 +399,7 @@ export class WorkingMemoryStore {
       JOIN facts_fts ON facts.rowid = facts_fts.rowid
       WHERE facts_fts MATCH ?
     `;
-    const params: unknown[] = [query];
+    const params: unknown[] = [sanitizedQuery];
 
     if (options.category) {
       sql += " AND facts.category = ?";
@@ -432,6 +441,27 @@ export class WorkingMemoryStore {
       supersedes: row.supersedes as string | undefined,
       expiresAt: row.expires_at as number | undefined,
     };
+  }
+
+  /**
+   * Sanitize a query string for FTS5 MATCH.
+   * FTS5 has special syntax characters that can cause "syntax error" if not escaped.
+   * We extract alphanumeric words and join them with spaces for a simple prefix search.
+   */
+  private sanitizeFtsQuery(query: string): string {
+    // Extract words (alphanumeric sequences), filter out very short ones
+    const words = query
+      .split(/[^\p{L}\p{N}]+/u)
+      .map((w) => w.trim())
+      .filter((w) => w.length >= 2);
+
+    if (words.length === 0) {
+      return "";
+    }
+
+    // Join with OR for broader matching, wrap each word for safety
+    // Use prefix matching with * for partial matches
+    return words.map((w) => `"${w}"*`).join(" OR ");
   }
 
   // ==========================================================================
