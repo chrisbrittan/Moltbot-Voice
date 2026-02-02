@@ -61,10 +61,21 @@ function buildTimeSection(params: { userTimezone?: string }) {
   if (!params.userTimezone) {
     return [];
   }
+  const now = new Date();
+  const formatted = now.toLocaleString("en-GB", {
+    timeZone: params.userTimezone,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
   return [
     "## Current Date & Time",
     `Time zone: ${params.userTimezone}`,
-    "If you need the current date, time, or day of week, use the session_status tool.",
+    `Current: ${formatted}`,
     "",
   ];
 }
