@@ -69,7 +69,7 @@ function collectSkillBins(entries: SkillEntry[]): string[] {
  * - Are not explicitly disabled
  */
 function getSkillsNeedingApiKeys(
-  cfg: MoltbotConfig,
+  cfg: OpenClawConfig,
   workspaceDir: string,
 ): Array<{
   skillKey: string;
@@ -137,7 +137,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
     entries[p.skillKey] = current;
     skills.entries = entries;
 
-    const nextConfig: MoltbotConfig = { ...cfg, skills };
+    const nextConfig: OpenClawConfig = { ...cfg, skills };
     await writeConfigFile(nextConfig);
     respond(true, { ok: true, skillKey: p.skillKey }, undefined);
   },
