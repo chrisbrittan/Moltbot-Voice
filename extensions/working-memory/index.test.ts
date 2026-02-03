@@ -11,10 +11,10 @@
  * - Pattern-based fact extraction
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 
 describe("working-memory plugin", () => {
   let tmpDir: string;
@@ -34,7 +34,7 @@ describe("working-memory plugin", () => {
 
     expect(workingMemoryPlugin.id).toBe("working-memory");
     expect(workingMemoryPlugin.name).toBe("Working Memory");
-    expect(workingMemoryPlugin.kind).toBe("memory");
+    expect(workingMemoryPlugin.kind).toBeUndefined();
     expect(workingMemoryPlugin.configSchema).toBeDefined();
     expect(workingMemoryPlugin.register).toBeInstanceOf(Function);
   });
@@ -181,7 +181,9 @@ describe("working-memory store", () => {
     });
 
     // Set user name to make hasIdentity true
-    await store.updateIdentity({ user: { name: "Test User", preferences: [], communication: [], context: {} } });
+    await store.updateIdentity({
+      user: { name: "Test User", preferences: [], communication: [], context: {} },
+    });
     // Set project to make hasActiveContext true
     await store.updateActiveContext({
       currentProject: { name: "Test", startedAt: Date.now(), status: "in_progress" },
@@ -503,11 +505,7 @@ describe("active context manager", () => {
 describe("pattern-based extraction", () => {
   test("extracts user name from message", async () => {
     const patterns = {
-      name: [
-        /my name is (\w+)/i,
-        /i'm (\w+)/i,
-        /call me (\w+)/i,
-      ],
+      name: [/my name is (\w+)/i, /i'm (\w+)/i, /call me (\w+)/i],
     };
 
     const messages = [
@@ -679,9 +677,7 @@ describe("vector store", () => {
 
     // Check unit length
     const length = Math.sqrt(
-      normalized[0] * normalized[0] +
-      normalized[1] * normalized[1] +
-      normalized[2] * normalized[2]
+      normalized[0] * normalized[0] + normalized[1] * normalized[1] + normalized[2] * normalized[2],
     );
     expect(length).toBeCloseTo(1.0);
 
@@ -722,12 +718,18 @@ describe("history chunk manager", () => {
     const store = new WorkingMemoryStore(tmpDir, logger);
     await store.initialize();
 
-    const manager = createHistoryChunkManager(store, null, null, {
-      enabled: true,
-      maxChunks: 100,
-      summarizeAfterMessages: 3, // Low threshold for testing
-      maxSummaryTokens: 500,
-    }, logger);
+    const manager = createHistoryChunkManager(
+      store,
+      null,
+      null,
+      {
+        enabled: true,
+        maxChunks: 100,
+        summarizeAfterMessages: 3, // Low threshold for testing
+        maxSummaryTokens: 500,
+      },
+      logger,
+    );
 
     // Add messages below threshold
     const chunk1 = await manager.processMessages([
@@ -737,9 +739,7 @@ describe("history chunk manager", () => {
     expect(chunk1).toBeNull(); // Not enough messages
 
     // Add more messages to hit threshold
-    const chunk2 = await manager.processMessages([
-      { role: "user", content: "What can you do?" },
-    ]);
+    const chunk2 = await manager.processMessages([{ role: "user", content: "What can you do?" }]);
     expect(chunk2).toBeDefined(); // Should create chunk now
     expect(chunk2?.topic).toBeDefined();
     expect(chunk2?.summary).toBeDefined();
@@ -755,12 +755,18 @@ describe("history chunk manager", () => {
     const store = new WorkingMemoryStore(tmpDir, logger);
     await store.initialize();
 
-    const manager = createHistoryChunkManager(store, null, null, {
-      enabled: true,
-      maxChunks: 100,
-      summarizeAfterMessages: 2,
-      maxSummaryTokens: 500,
-    }, logger);
+    const manager = createHistoryChunkManager(
+      store,
+      null,
+      null,
+      {
+        enabled: true,
+        maxChunks: 100,
+        summarizeAfterMessages: 2,
+        maxSummaryTokens: 500,
+      },
+      logger,
+    );
 
     const chunk = await manager.processMessages([
       { role: "user", content: "Let's work on the Working Memory plugin for Moltbot" },
@@ -783,12 +789,18 @@ describe("history chunk manager", () => {
     const store = new WorkingMemoryStore(tmpDir, logger);
     await store.initialize();
 
-    const manager = createHistoryChunkManager(store, null, null, {
-      enabled: true,
-      maxChunks: 100,
-      summarizeAfterMessages: 10, // High threshold
-      maxSummaryTokens: 500,
-    }, logger);
+    const manager = createHistoryChunkManager(
+      store,
+      null,
+      null,
+      {
+        enabled: true,
+        maxChunks: 100,
+        summarizeAfterMessages: 10, // High threshold
+        maxSummaryTokens: 500,
+      },
+      logger,
+    );
 
     // Add messages below threshold
     await manager.processMessages([
@@ -812,7 +824,7 @@ describe("llm extraction", () => {
     const logger = { info: () => {}, warn: () => {}, error: () => {} };
     const service = createLLMExtractionService(
       { model: "claude-3-5-haiku-latest", provider: "anthropic" },
-      logger
+      logger,
     );
 
     expect(service).toBeDefined();
@@ -924,7 +936,7 @@ describe("memory consolidation", () => {
         expireAfterDays: 0, // Expire immediately
         expireConfidenceThreshold: 0.5,
       },
-      logger
+      logger,
     );
 
     const result = await consolidator.consolidate();
@@ -960,7 +972,7 @@ describe("memory consolidation", () => {
         expireAfterDays: 0,
         expireConfidenceThreshold: 0.5,
       },
-      logger
+      logger,
     );
 
     const result = await consolidator.consolidate();
@@ -1003,7 +1015,7 @@ describe("memory consolidation", () => {
         expireAfterDays: 365, // Don't expire by age
         duplicateSimilarityThreshold: 0.7, // Lower threshold for test
       },
-      logger
+      logger,
     );
 
     const result = await consolidator.consolidate();
@@ -1049,7 +1061,7 @@ describe("context injector", () => {
       facts,
       integrations,
       defaultConfig.injection,
-      logger
+      logger,
     );
 
     // Add some data

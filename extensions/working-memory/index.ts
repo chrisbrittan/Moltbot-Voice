@@ -14,22 +14,21 @@
  * - Survives compaction - working memory is OUTSIDE the compaction pipeline
  */
 
-import { Type } from "@sinclair/typebox";
 import type { MoltbotPluginApi } from "moltbot/plugin-sdk";
-
+import { Type } from "@sinclair/typebox";
 import { workingMemoryConfigSchema, defaultConfig, type WorkingMemoryConfig } from "./config.js";
-import { WorkingMemoryStore } from "./src/store.js";
-import { IdentityManager } from "./src/identity.js";
 import { ActiveContextManager } from "./src/active-context.js";
-import { FactStore } from "./src/facts.js";
-import { IntegrationCache } from "./src/integrations.js";
-import { ContextInjector } from "./src/injection.js";
-import { FactExtractor } from "./src/extraction.js";
-import { registerGatewayMethods } from "./src/gateway.js";
-import { createEmbeddingService, type EmbeddingService } from "./src/embeddings.js";
-import { createVectorStore, type VectorStore } from "./src/vector-store.js";
-import { createHistoryChunkManager, type HistoryChunkManager } from "./src/history-chunks.js";
 import { createMemoryConsolidator, type MemoryConsolidator } from "./src/consolidation.js";
+import { createEmbeddingService, type EmbeddingService } from "./src/embeddings.js";
+import { FactExtractor } from "./src/extraction.js";
+import { FactStore } from "./src/facts.js";
+import { registerGatewayMethods } from "./src/gateway.js";
+import { createHistoryChunkManager, type HistoryChunkManager } from "./src/history-chunks.js";
+import { IdentityManager } from "./src/identity.js";
+import { ContextInjector } from "./src/injection.js";
+import { IntegrationCache } from "./src/integrations.js";
+import { WorkingMemoryStore } from "./src/store.js";
+import { createVectorStore, type VectorStore } from "./src/vector-store.js";
 
 // ============================================================================
 // Plugin Definition
@@ -38,8 +37,8 @@ import { createMemoryConsolidator, type MemoryConsolidator } from "./src/consoli
 const workingMemoryPlugin = {
   id: "working-memory",
   name: "Working Memory",
-  description: "Protected context layer for PA brain - identity, active context, facts, integrations",
-  kind: "memory" as const,
+  description:
+    "Protected context layer for PA brain - identity, active context, facts, integrations",
   configSchema: workingMemoryConfigSchema,
 
   register(api: MoltbotPluginApi) {
@@ -59,10 +58,16 @@ const workingMemoryPlugin = {
     };
 
     // Resolve API key for LLM extraction from main config if not provided
-    if (cfg.extraction && (cfg.extraction.mode === "llm" || cfg.extraction.mode === "hybrid") && !cfg.extraction.apiKey) {
+    if (
+      cfg.extraction &&
+      (cfg.extraction.mode === "llm" || cfg.extraction.mode === "hybrid") &&
+      !cfg.extraction.apiKey
+    ) {
       const provider = cfg.extraction.provider ?? "anthropic";
       // Try to get API key from models.providers config
-      const providerConfig = api.config.models?.providers?.[provider] as { apiKey?: string } | undefined;
+      const providerConfig = api.config.models?.providers?.[provider] as
+        | { apiKey?: string }
+        | undefined;
       if (providerConfig?.apiKey) {
         cfg.extraction.apiKey = providerConfig.apiKey;
         api.logger.info(`working-memory: using ${provider} API key from models.providers config`);
@@ -91,8 +96,22 @@ const workingMemoryPlugin = {
     }
     const facts = new FactStore(store, api.logger);
     const integrations = new IntegrationCache(store, cfg.integrations!, api.logger);
-    const injector = new ContextInjector(identity, activeContext, facts, integrations, cfg.injection!, api.logger);
-    const extractor = new FactExtractor(store, identity, activeContext, facts, cfg.extraction!, api.logger);
+    const injector = new ContextInjector(
+      identity,
+      activeContext,
+      facts,
+      integrations,
+      cfg.injection!,
+      api.logger,
+    );
+    const extractor = new FactExtractor(
+      store,
+      identity,
+      activeContext,
+      facts,
+      cfg.extraction!,
+      api.logger,
+    );
 
     // Initialize Phase 2 components (embeddings & vector search)
     let embeddings: EmbeddingService | null = null;
@@ -101,23 +120,33 @@ const workingMemoryPlugin = {
 
     if (cfg.embeddings?.enabled) {
       embeddings = createEmbeddingService(cfg.embeddings, api.logger);
-      vectorStore = createVectorStore(store, { maxInMemoryChunks: cfg.historyChunks?.maxChunks ?? 100 }, api.logger);
+      vectorStore = createVectorStore(
+        store,
+        { maxInMemoryChunks: cfg.historyChunks?.maxChunks ?? 100 },
+        api.logger,
+      );
 
       // Wire up to injector for semantic retrieval
       injector.setEmbeddingService(embeddings);
       injector.setVectorStore(vectorStore);
 
       api.logger.info(
-        `working-memory: embeddings enabled (${cfg.embeddings.provider}/${cfg.embeddings.model})`
+        `working-memory: embeddings enabled (${cfg.embeddings.provider}/${cfg.embeddings.model})`,
       );
     }
 
     // Initialize history chunk manager (Phase 2)
     if (cfg.historyChunks?.enabled) {
-      historyChunks = createHistoryChunkManager(store, embeddings, vectorStore, cfg.historyChunks, api.logger);
+      historyChunks = createHistoryChunkManager(
+        store,
+        embeddings,
+        vectorStore,
+        cfg.historyChunks,
+        api.logger,
+      );
 
       api.logger.info(
-        `working-memory: history chunks enabled (summarize after ${cfg.historyChunks.summarizeAfterMessages} messages)`
+        `working-memory: history chunks enabled (summarize after ${cfg.historyChunks.summarizeAfterMessages} messages)`,
       );
     }
 
@@ -126,7 +155,7 @@ const workingMemoryPlugin = {
 
     if (cfg.consolidation?.enabled) {
       api.logger.info(
-        `working-memory: consolidation enabled (every ${cfg.consolidation.intervalHours}h, expire after ${cfg.consolidation.expireAfterDays}d)`
+        `working-memory: consolidation enabled (every ${cfg.consolidation.intervalHours}h, expire after ${cfg.consolidation.expireAfterDays}d)`,
       );
     }
 
@@ -193,7 +222,11 @@ const workingMemoryPlugin = {
               timestamp: Date.now(),
             }));
 
-            await historyChunks.processMessages(conversationMessages, ctx.sessionKey, ctx.channelId);
+            await historyChunks.processMessages(
+              conversationMessages,
+              ctx.sessionKey,
+              ctx.channelId,
+            );
           } catch (err) {
             api.logger.warn(`working-memory: history chunk processing failed: ${String(err)}`);
           }
@@ -217,19 +250,19 @@ const workingMemoryPlugin = {
             Type.Object({
               name: Type.String({ description: "Project name" }),
               goal: Type.Optional(Type.String({ description: "Project goal" })),
-            })
+            }),
           ),
           task: Type.Optional(
             Type.Object({
               description: Type.String({ description: "Current task" }),
               files: Type.Optional(Type.Array(Type.String(), { description: "Files involved" })),
-            })
+            }),
           ),
           decision: Type.Optional(
             Type.Object({
               decision: Type.String({ description: "Decision made" }),
               reasoning: Type.Optional(Type.String({ description: "Why this decision" })),
-            })
+            }),
           ),
         }),
         async execute(_toolCallId, params) {
@@ -265,7 +298,7 @@ const workingMemoryPlugin = {
           };
         },
       },
-      { name: "working_memory_set_context" }
+      { name: "working_memory_set_context" },
     );
 
     // Tool: Remember a fact
@@ -280,7 +313,7 @@ const workingMemoryPlugin = {
           category: Type.Optional(
             Type.String({
               description: "Category: user, preference, decision, project, or other",
-            })
+            }),
           ),
           subject: Type.Optional(Type.String({ description: "What/who this is about" })),
         }),
@@ -288,7 +321,11 @@ const workingMemoryPlugin = {
           // Ensure store is initialized
           await store.initialize();
 
-          const { fact, category = "other", subject = "general" } = params as {
+          const {
+            fact,
+            category = "other",
+            subject = "general",
+          } = params as {
             fact: string;
             category?: string;
             subject?: string;
@@ -306,7 +343,7 @@ const workingMemoryPlugin = {
           };
         },
       },
-      { name: "working_memory_remember" }
+      { name: "working_memory_remember" },
     );
 
     // Tool: Search facts
@@ -324,7 +361,11 @@ const workingMemoryPlugin = {
           // Ensure store is initialized
           await store.initialize();
 
-          const { query, category, limit = 10 } = params as {
+          const {
+            query,
+            category,
+            limit = 10,
+          } = params as {
             query: string;
             category?: string;
             limit?: number;
@@ -339,9 +380,7 @@ const workingMemoryPlugin = {
             };
           }
 
-          const text = results
-            .map((r, i) => `${i + 1}. [${r.category}] ${r.value}`)
-            .join("\n");
+          const text = results.map((r, i) => `${i + 1}. [${r.category}] ${r.value}`).join("\n");
 
           return {
             content: [{ type: "text", text: `Found ${results.length} facts:\n\n${text}` }],
@@ -349,7 +388,7 @@ const workingMemoryPlugin = {
           };
         },
       },
-      { name: "working_memory_recall" }
+      { name: "working_memory_recall" },
     );
 
     // ========================================================================
@@ -363,9 +402,7 @@ const workingMemoryPlugin = {
 
     api.registerCli(
       ({ program }) => {
-        const wm = program
-          .command("wm")
-          .description("Working Memory plugin commands");
+        const wm = program.command("wm").description("Working Memory plugin commands");
 
         wm.command("status")
           .description("Show working memory status")
@@ -453,8 +490,8 @@ const workingMemoryPlugin = {
                   vectorStoreSize: vectorStore?.size() ?? 0,
                 },
                 null,
-                2
-              )
+                2,
+              ),
             );
           });
 
@@ -488,8 +525,8 @@ const workingMemoryPlugin = {
                   },
                 },
                 null,
-                2
-              )
+                2,
+              ),
             );
           });
 
@@ -510,8 +547,8 @@ const workingMemoryPlugin = {
                   prunedChunks: result.prunedChunks,
                 },
                 null,
-                2
-              )
+                2,
+              ),
             );
           });
 
@@ -530,12 +567,12 @@ const workingMemoryPlugin = {
                   nextRunAt: nextRun ? new Date(nextRun).toISOString() : null,
                 },
                 null,
-                2
-              )
+                2,
+              ),
             );
           });
       },
-      { commands: ["wm"] }
+      { commands: ["wm"] },
     );
 
     // ========================================================================
