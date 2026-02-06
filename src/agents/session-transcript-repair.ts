@@ -114,11 +114,21 @@ export function repairToolCallInputs(messages: AgentMessage[]): ToolCallInputRep
       continue;
     }
 
+    // When an assistant message has stopReason "error", the LLM streaming was
+    // interrupted mid-generation. Tool call blocks in such messages may have
+    // partially-parsed arguments that look valid but were never completed.
+    // Anthropic's API won't recognise them as proper tool_use blocks, so any
+    // synthetic tool_result the pairing repair would later insert becomes an
+    // orphan — causing a permanent 400 loop. Strip all tool calls from
+    // error-stopped messages to prevent this.
+    const stopReason = (msg as Record<string, unknown>).stopReason;
+    const isStreamError = stopReason === "error";
+
     const nextContent = [];
     let droppedInMessage = 0;
 
     for (const block of msg.content) {
-      if (isToolCallBlock(block) && !hasToolCallInput(block)) {
+      if (isToolCallBlock(block) && (!hasToolCallInput(block) || isStreamError)) {
         droppedToolCalls += 1;
         droppedInMessage += 1;
         changed = true;

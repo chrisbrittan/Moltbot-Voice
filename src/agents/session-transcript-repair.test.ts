@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import {
+  repairToolCallInputs,
   sanitizeToolCallInputs,
   sanitizeToolUseResultPairing,
 } from "./session-transcript-repair.js";
@@ -92,6 +93,36 @@ describe("sanitizeToolUseResultPairing", () => {
     expect(results[0]?.toolCallId).toBe("call_1");
   });
 
+  it("does not create synthetic results for error-stopped tool calls after input repair", () => {
+    // Simulates the real scenario: assistant has a malformed tool call with stopReason "error".
+    // After sanitizeToolCallInputs strips it, sanitizeToolUseResultPairing should not see it.
+    const input: AgentMessage[] = [
+      { role: "user", content: "send a message" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll send that now" },
+          {
+            type: "toolCall",
+            id: "call_broken",
+            name: "message",
+            arguments: { action: "send", targets: 123 },
+          },
+        ],
+        stopReason: "error",
+      } as AgentMessage,
+      { role: "user", content: "what happened?" },
+    ];
+
+    // First pass: strip broken tool calls
+    const repaired = sanitizeToolCallInputs(input);
+    // Second pass: should not insert synthetic results for the stripped call
+    const paired = sanitizeToolUseResultPairing(repaired);
+
+    expect(paired.some((m) => m.role === "toolResult")).toBe(false);
+    expect(paired.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+  });
+
   it("drops orphan tool results that do not match any tool call", () => {
     const input = [
       { role: "user", content: "hello" },
@@ -126,6 +157,57 @@ describe("sanitizeToolCallInputs", () => {
 
     const out = sanitizeToolCallInputs(input);
     expect(out.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("strips tool calls from assistant messages with stopReason error", () => {
+    const input: AgentMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me send that message" },
+          {
+            type: "toolCall",
+            id: "call_broken",
+            name: "message",
+            arguments: { action: "send", channel: "telegram", targets: 123 },
+          },
+        ],
+        stopReason: "error",
+      } as AgentMessage,
+    ];
+
+    const report = repairToolCallInputs(input);
+    expect(report.droppedToolCalls).toBe(1);
+    // Text block preserved, tool call stripped
+    const assistant = report.messages[0] as Extract<AgentMessage, { role: "assistant" }>;
+    const types = Array.isArray(assistant.content)
+      ? assistant.content.map((block) => (block as { type?: unknown }).type)
+      : [];
+    expect(types).toEqual(["text"]);
+  });
+
+  it("drops entire assistant message with stopReason error when only tool calls", () => {
+    const input: AgentMessage[] = [
+      { role: "user", content: "do something" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_broken",
+            name: "message",
+            arguments: { action: "send" },
+          },
+        ],
+        stopReason: "error",
+      } as AgentMessage,
+      { role: "user", content: "hello again" },
+    ];
+
+    const report = repairToolCallInputs(input);
+    expect(report.droppedToolCalls).toBe(1);
+    expect(report.droppedAssistantMessages).toBe(1);
+    expect(report.messages.map((m) => m.role)).toEqual(["user", "user"]);
   });
 
   it("keeps valid tool calls and preserves text blocks", () => {
