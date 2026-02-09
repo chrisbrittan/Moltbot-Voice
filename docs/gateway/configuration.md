@@ -289,7 +289,7 @@ process env is missing the key (same non-overriding rule):
 }
 ```
 
-See [/environment](/environment) for full precedence and sources.
+See [/environment](/help/environment) for full precedence and sources.
 
 ### `env.shellEnv` (optional)
 
@@ -765,7 +765,7 @@ Inbound messages are routed to an agent via bindings.
 - `bindings[]`: routes inbound messages to an `agentId`.
   - `match.channel` (required)
   - `match.accountId` (optional; `*` = any account; omitted = default account)
-  - `match.peer` (optional; `{ kind: dm|group|channel, id }`)
+  - `match.peer` (optional; `{ kind: direct|group|channel, id }`)
   - `match.guildId` / `match.teamId` (optional; channel-specific)
 
 Deterministic match order:
@@ -788,7 +788,7 @@ levels in one gateway:
 - **Read-only** tools + workspace
 - **No filesystem access** (messaging/session tools only)
 
-See [Multi-Agent Sandbox & Tools](/multi-agent-sandbox-tools) for precedence and
+See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for precedence and
 additional examples.
 
 Full access (no sandbox):
@@ -1310,13 +1310,14 @@ Thread session isolation:
 - `channels.slack.thread.inheritParent` controls whether new thread sessions inherit the parent channel transcript (default: false).
 
 Slack action groups (gate `slack` tool actions):
-| Action group | Default | Notes |
-| --- | --- | --- |
-| reactions | enabled | React + list reactions |
-| messages | enabled | Read/send/edit/delete |
-| pins | enabled | Pin/unpin/list |
-| memberInfo | enabled | Member info |
-| emojiList | enabled | Custom emoji list |
+
+| Action group | Default | Notes                  |
+| ------------ | ------- | ---------------------- |
+| reactions    | enabled | React + list reactions |
+| messages     | enabled | Read/send/edit/delete  |
+| pins         | enabled | Pin/unpin/list         |
+| memberInfo   | enabled | Member info            |
+| emojiList    | enabled | Custom emoji list      |
 
 ### `channels.mattermost` (bot token)
 
@@ -1452,7 +1453,7 @@ working directory). The path must exist to be used.
 
 ### `agents.defaults.skipBootstrap`
 
-Disables automatic creation of the workspace bootstrap files (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, and `BOOTSTRAP.md`).
+Disables automatic creation of the workspace bootstrap files (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`, and `BOOTSTRAP.md`).
 
 Use this for pre-seeded deployments where your workspace files come from a repo.
 
@@ -1977,11 +1978,13 @@ Block streaming:
 - `agents.defaults.blockStreamingChunk`: soft chunking for streamed blocks. Defaults to
   800–1200 chars, prefers paragraph breaks (`\n\n`), then newlines, then sentences.
   Example:
+
   ```json5
   {
     agents: { defaults: { blockStreamingChunk: { minChars: 800, maxChars: 1200 } } },
   }
   ```
+
 - `agents.defaults.blockStreamingCoalesce`: merge streamed blocks before sending.
   Defaults to `{ idleMs: 1000 }` and inherits `minChars` from `blockStreamingChunk`
   with `maxChars` capped to the channel text limit. Signal/Slack/Discord/Google Chat default
@@ -1995,11 +1998,13 @@ Block streaming:
   Modes: `off` (default), `natural` (800–2500ms), `custom` (use `minMs`/`maxMs`).
   Per-agent override: `agents.list[].humanDelay`.
   Example:
+
   ```json5
   {
     agents: { defaults: { humanDelay: { mode: "natural" } } },
   }
   ```
+
   See [/concepts/streaming](/concepts/streaming) for behavior + chunking details.
 
 Typing indicators:
@@ -2065,7 +2070,7 @@ of `every`, keep `HEARTBEAT.md` tiny, and/or choose a cheaper `model`.
 - `tools.web.fetch.readability` (default true; disable to use basic HTML cleanup only)
 - `tools.web.fetch.firecrawl.enabled` (default true when an API key is set)
 - `tools.web.fetch.firecrawl.apiKey` (optional; defaults to `FIRECRAWL_API_KEY`)
-- `tools.web.fetch.firecrawl.baseUrl` (default https://api.firecrawl.dev)
+- `tools.web.fetch.firecrawl.baseUrl` (default [https://api.firecrawl.dev](https://api.firecrawl.dev))
 - `tools.web.fetch.firecrawl.onlyMainContent` (default true)
 - `tools.web.fetch.firecrawl.maxAgeMs` (optional)
 - `tools.web.fetch.firecrawl.timeoutSeconds` (optional)
@@ -2481,7 +2486,7 @@ Select the model via `agents.defaults.model.primary` (provider/model).
 
 OpenCode Zen is a multi-model gateway with per-model endpoints. OpenClaw uses
 the built-in `opencode` provider from pi-ai; set `OPENCODE_API_KEY` (or
-`OPENCODE_ZEN_API_KEY`) from https://opencode.ai/auth.
+`OPENCODE_ZEN_API_KEY`) from [https://opencode.ai/auth](https://opencode.ai/auth).
 
 Notes:
 
@@ -2755,7 +2760,7 @@ Controls session scoping, reset policy, reset triggers, and where the session st
     },
     resetByType: {
       thread: { mode: "daily", atHour: 4 },
-      dm: { mode: "idle", idleMinutes: 240 },
+      direct: { mode: "idle", idleMinutes: 240 },
       group: { mode: "idle", idleMinutes: 120 },
     },
     resetTriggers: ["/new", "/reset"],
@@ -2792,7 +2797,7 @@ Fields:
   - `mode`: `daily` or `idle` (default: `daily` when `reset` is present).
   - `atHour`: local hour (0-23) for the daily reset boundary.
   - `idleMinutes`: sliding idle window in minutes. When daily + idle are both configured, whichever expires first wins.
-- `resetByType`: per-session overrides for `dm`, `group`, and `thread`.
+- `resetByType`: per-session overrides for `direct`, `group`, and `thread`. Legacy `dm` key is accepted as an alias for `direct`.
   - If you only set legacy `session.idleMinutes` without any `reset`/`resetByType`, OpenClaw stays in idle-only mode for backward compatibility.
 - `heartbeatIdleMinutes`: optional idle override for heartbeat checks (daily reset still applies when enabled).
 - `agentToAgent.maxPingPongTurns`: max reply-back turns between requester/target (0–5, default 5).
@@ -2852,7 +2857,7 @@ Example:
 Controls plugin discovery, allow/deny, and per-plugin config. Plugins are loaded
 from `~/.openclaw/extensions`, `<workspace>/.openclaw/extensions`, plus any
 `plugins.load.paths` entries. **Config changes require a gateway restart.**
-See [/plugin](/plugin) for full usage.
+See [/plugin](/tools/plugin) for full usage.
 
 Fields:
 
@@ -3366,7 +3371,7 @@ openclaw dns setup --apply
 }
 ```
 
-## Template variables
+## Media model template variables
 
 Template placeholders are expanded in `tools.media.*.models[].args` and `tools.media.models[].args` (and any future templated argument fields).
 

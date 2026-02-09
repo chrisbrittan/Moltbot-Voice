@@ -121,7 +121,7 @@ export function repairToolCallInputs(messages: AgentMessage[]): ToolCallInputRep
     // synthetic tool_result the pairing repair would later insert becomes an
     // orphan — causing a permanent 400 loop. Strip all tool calls from
     // error-stopped messages to prevent this.
-    const stopReason = (msg as Record<string, unknown>).stopReason;
+    const stopReason = (msg as unknown as Record<string, unknown>).stopReason;
     const isStreamError = stopReason === "error";
 
     const nextContent = [];
