@@ -204,7 +204,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Outlook CLI")
     parser.add_argument("command", choices=["emails", "search", "read", "send", "calendar", "whoami"])
-    parser.add_argument("--account", "-a", default="business", choices=["business", "personal"])
+    parser.add_argument("--account", "-a", default="business", choices=["business", "personal", "natalie", "natalie-business"])
     parser.add_argument("--count", "-n", type=int, default=10)
     parser.add_argument("--query", "-q", help="Search query")
     parser.add_argument("--id", help="Email ID")
