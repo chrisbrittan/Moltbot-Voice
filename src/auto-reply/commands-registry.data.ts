@@ -320,8 +320,7 @@ function buildChatCommands(): ChatCommandDefinition[] {
       args: [
         {
           name: "action",
-          description:
-            "spawn | cancel | steer | close | sessions | status | set-mode | set | cwd | permissions | timeout | model | reset-options | doctor | install | help",
+          description: "ACP action to perform (e.g. spawn, cancel, status, set, help)",
           type: "string",
           choices: [
             "spawn",
