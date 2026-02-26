@@ -1,6 +1,6 @@
 import AppKit
-import MoltbotIPC
-import MoltbotProtocol
+import OpenClawIPC
+import OpenClawProtocol
 import SwiftUI
 
 // MARK: - Simplified Onboarding Pages

@@ -1,4 +1,4 @@
-import MoltbotProtocol
+import OpenClawProtocol
 import SwiftUI
 
 /// Model for a skill that needs an API key
