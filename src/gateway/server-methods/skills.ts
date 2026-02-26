@@ -1,5 +1,3 @@
-import type { OpenClawConfig } from "../../config/config.js";
-import type { GatewayRequestHandlers } from "./types.js";
 import {
   listAgentIds,
   resolveAgentWorkspaceDir,
@@ -8,9 +6,12 @@ import {
 import { installSkill } from "../../agents/skills-install.js";
 import { buildWorkspaceSkillStatus } from "../../agents/skills-status.js";
 import { loadWorkspaceSkillEntries, type SkillEntry } from "../../agents/skills.js";
+import { listAgentWorkspaceDirs } from "../../agents/workspace-dirs.js";
+import type { OpenClawConfig } from "../../config/config.js";
 import { loadConfig, writeConfigFile } from "../../config/config.js";
 import { getRemoteSkillEligibility } from "../../infra/skills-remote.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
+import { normalizeSecretInput } from "../../utils/normalize-secret-input.js";
 import {
   ErrorCodes,
   errorShape,
@@ -20,20 +21,7 @@ import {
   validateSkillsStatusParams,
   validateSkillsUpdateParams,
 } from "../protocol/index.js";
-
-function listWorkspaceDirs(cfg: OpenClawConfig): string[] {
-  const dirs = new Set<string>();
-  const list = cfg.agents?.list;
-  if (Array.isArray(list)) {
-    for (const entry of list) {
-      if (entry && typeof entry === "object" && typeof entry.id === "string") {
-        dirs.add(resolveAgentWorkspaceDir(cfg, entry.id));
-      }
-    }
-  }
-  dirs.add(resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg)));
-  return [...dirs];
-}
+import type { GatewayRequestHandlers } from "./types.js";
 
 function collectSkillBins(entries: SkillEntry[]): string[] {
   const bins = new Set<string>();
@@ -66,87 +54,7 @@ function collectSkillBins(entries: SkillEntry[]): string[] {
   return [...bins].toSorted();
 }
 
-/**
- * Get skills that need API keys for just-in-time prompting.
- * Returns only skills that:
- * - Have a primaryEnv defined
- * - Are missing that env var
- * - Are not explicitly disabled
- */
-function getSkillsNeedingApiKeys(
-  cfg: OpenClawConfig,
-  workspaceDir: string,
-): Array<{
-  skillKey: string;
-  name: string;
-  description: string;
-  primaryEnv: string;
-  emoji?: string;
-}> {
-  const report = buildWorkspaceSkillStatus(workspaceDir, {
-    config: cfg,
-    eligibility: { remote: getRemoteSkillEligibility() },
-  });
-
-  return report.skills
-    .filter((skill) => {
-      // Must have a primary API key env var defined
-      if (!skill.primaryEnv) return false;
-      // Must be missing that env var
-      if (!skill.missing.env.includes(skill.primaryEnv)) return false;
-      // Must not be explicitly disabled
-      if (skill.disabled) return false;
-      return true;
-    })
-    .map((skill) => ({
-      skillKey: skill.skillKey,
-      name: skill.name,
-      description: skill.description,
-      primaryEnv: skill.primaryEnv!,
-      emoji: skill.emoji,
-    }));
-}
-
 export const skillsHandlers: GatewayRequestHandlers = {
-  /**
-   * Get skills needing API keys for just-in-time prompting.
-   * Used by macOS app to show prompts when user first tries to use a skill.
-   */
-  "skills.needs_api_keys": ({ respond }) => {
-    const cfg = loadConfig();
-    const workspaceDir = resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg));
-    const skills = getSkillsNeedingApiKeys(cfg, workspaceDir);
-    respond(true, { skills }, undefined);
-  },
-
-  /**
-   * Set API key for a skill (just-in-time).
-   * Convenience wrapper around skills.update for single API key updates.
-   */
-  "skills.set_api_key": async ({ params, respond }) => {
-    const p = params as { skillKey?: string; apiKey?: string };
-    if (!p.skillKey || typeof p.skillKey !== "string") {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "skillKey required"));
-      return;
-    }
-    if (!p.apiKey || typeof p.apiKey !== "string") {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "apiKey required"));
-      return;
-    }
-
-    const cfg = loadConfig();
-    const skills = cfg.skills ? { ...cfg.skills } : {};
-    const entries = skills.entries ? { ...skills.entries } : {};
-    const current = entries[p.skillKey] ? { ...entries[p.skillKey] } : {};
-    current.apiKey = p.apiKey.trim();
-    entries[p.skillKey] = current;
-    skills.entries = entries;
-
-    const nextConfig: OpenClawConfig = { ...cfg, skills };
-    await writeConfigFile(nextConfig);
-    respond(true, { ok: true, skillKey: p.skillKey }, undefined);
-  },
-
   "skills.status": ({ params, respond }) => {
     if (!validateSkillsStatusParams(params)) {
       respond(
@@ -193,7 +101,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
       return;
     }
     const cfg = loadConfig();
-    const workspaceDirs = listWorkspaceDirs(cfg);
+    const workspaceDirs = listAgentWorkspaceDirs(cfg);
     const bins = new Set<string>();
     for (const workspaceDir of workspaceDirs) {
       const entries = loadWorkspaceSkillEntries(workspaceDir, { config: cfg });
@@ -261,7 +169,7 @@ export const skillsHandlers: GatewayRequestHandlers = {
       current.enabled = p.enabled;
     }
     if (typeof p.apiKey === "string") {
-      const trimmed = p.apiKey.trim();
+      const trimmed = normalizeSecretInput(p.apiKey);
       if (trimmed) {
         current.apiKey = trimmed;
       } else {

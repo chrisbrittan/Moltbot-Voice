@@ -1,11 +1,12 @@
-import type { ImageContent } from "@mariozechner/pi-ai";
-import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { extractTextFromMessage } from "../../../tui/tui-formatters.js";
+import type { ImageContent } from "@mariozechner/pi-ai";
 import { resolveUserPath } from "../../../utils.js";
 import { loadWebMedia } from "../../../web/media.js";
+import type { ImageSanitizationLimits } from "../../image-sanitization.js";
+import { resolveSandboxedBridgeMediaPath } from "../../sandbox-media-paths.js";
 import { assertSandboxPath } from "../../sandbox-paths.js";
+import type { SandboxFsBridge } from "../../sandbox/fs-bridge.js";
 import { sanitizeImageBlocks } from "../../tool-images.js";
 import { log } from "../logger.js";
 
@@ -50,8 +51,13 @@ function isImageExtension(filePath: string): boolean {
 async function sanitizeImagesWithLog(
   images: ImageContent[],
   label: string,
+  imageSanitization?: ImageSanitizationLimits,
 ): Promise<ImageContent[]> {
-  const { images: sanitized, dropped } = await sanitizeImageBlocks(images, label);
+  const { images: sanitized, dropped } = await sanitizeImageBlocks(
+    images,
+    label,
+    imageSanitization,
+  );
   if (dropped > 0) {
     log.warn(`Native image: dropped ${dropped} image(s) after sanitization (${label}).`);
   }
@@ -177,8 +183,8 @@ export async function loadImageFromRef(
   workspaceDir: string,
   options?: {
     maxBytes?: number;
-    /** If set, enforce that file paths are within this sandbox root */
-    sandboxRoot?: string;
+    workspaceOnly?: boolean;
+    sandbox?: { root: string; bridge: SandboxFsBridge };
   },
 ): Promise<ImageContent | null> {
   try {
@@ -190,46 +196,47 @@ export async function loadImageFromRef(
       return null;
     }
 
-    // For file paths, resolve relative to the appropriate root:
-    // - When sandbox is enabled, resolve relative to sandboxRoot for security
-    // - Otherwise, resolve relative to workspaceDir
-    // Note: ref.resolved may already be absolute (e.g., after ~ expansion in detectImageReferences),
-    // in which case we skip relative resolution.
-    if (ref.type === "path" && !path.isAbsolute(targetPath)) {
-      const resolveRoot = options?.sandboxRoot ?? workspaceDir;
-      targetPath = path.resolve(resolveRoot, targetPath);
-    }
-
-    // Enforce sandbox restrictions if sandboxRoot is set
-    if (ref.type === "path" && options?.sandboxRoot) {
-      try {
-        const validated = await assertSandboxPath({
-          filePath: targetPath,
-          cwd: options.sandboxRoot,
-          root: options.sandboxRoot,
-        });
-        targetPath = validated.resolved;
-      } catch (err) {
-        // Log the actual error for debugging (sandbox violation or other path error)
-        log.debug(
-          `Native image: sandbox validation failed for ${ref.resolved}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        return null;
-      }
-    }
-
-    // Check file exists for local paths
+    // Resolve paths relative to sandbox or workspace as needed
     if (ref.type === "path") {
-      try {
-        await fs.stat(targetPath);
-      } catch {
-        log.debug(`Native image: file not found: ${targetPath}`);
-        return null;
+      if (options?.sandbox) {
+        try {
+          const resolved = await resolveSandboxedBridgeMediaPath({
+            sandbox: {
+              root: options.sandbox.root,
+              bridge: options.sandbox.bridge,
+              workspaceOnly: options.workspaceOnly,
+            },
+            mediaPath: targetPath,
+          });
+          targetPath = resolved.resolved;
+        } catch (err) {
+          log.debug(
+            `Native image: sandbox validation failed for ${ref.resolved}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return null;
+        }
+      } else if (!path.isAbsolute(targetPath)) {
+        targetPath = path.resolve(workspaceDir, targetPath);
+      }
+      if (options?.workspaceOnly && !options?.sandbox) {
+        const root = options?.sandbox?.root ?? workspaceDir;
+        await assertSandboxPath({
+          filePath: targetPath,
+          cwd: root,
+          root,
+        });
       }
     }
 
     // loadWebMedia handles local file paths (including file:// URLs)
-    const media = await loadWebMedia(targetPath, options?.maxBytes);
+    const media = options?.sandbox
+      ? await loadWebMedia(targetPath, {
+          maxBytes: options.maxBytes,
+          sandboxValidated: true,
+          readFile: (filePath) =>
+            options.sandbox!.bridge.readFile({ filePath, cwd: options.sandbox!.root }),
+        })
+      : await loadWebMedia(targetPath, options?.maxBytes);
 
     if (media.kind !== "image") {
       log.debug(`Native image: not an image file: ${targetPath} (got ${media.kind})`);
@@ -259,6 +266,30 @@ export async function loadImageFromRef(
  */
 export function modelSupportsImages(model: { input?: string[] }): boolean {
   return model.input?.includes("image") ?? false;
+}
+
+function extractTextFromMessage(message: unknown): string {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const textParts: string[] = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") {
+      continue;
+    }
+    const record = part as Record<string, unknown>;
+    if (record.type === "text" && typeof record.text === "string") {
+      textParts.push(record.text);
+    }
+  }
+  return textParts.join("\n").trim();
 }
 
 /**
@@ -344,8 +375,9 @@ export async function detectAndLoadPromptImages(params: {
   existingImages?: ImageContent[];
   historyMessages?: unknown[];
   maxBytes?: number;
-  /** If set, enforce that file paths are within this sandbox root */
-  sandboxRoot?: string;
+  maxDimensionPx?: number;
+  workspaceOnly?: boolean;
+  sandbox?: { root: string; bridge: SandboxFsBridge };
 }): Promise<{
   /** Images for the current prompt (existingImages + detected in current prompt) */
   images: ImageContent[];
@@ -406,7 +438,8 @@ export async function detectAndLoadPromptImages(params: {
   for (const ref of allRefs) {
     const image = await loadImageFromRef(ref, params.workspaceDir, {
       maxBytes: params.maxBytes,
-      sandboxRoot: params.sandboxRoot,
+      workspaceOnly: params.workspaceOnly,
+      sandbox: params.sandbox,
     });
     if (image) {
       if (ref.messageIndex !== undefined) {
@@ -428,10 +461,21 @@ export async function detectAndLoadPromptImages(params: {
     }
   }
 
-  const sanitizedPromptImages = await sanitizeImagesWithLog(promptImages, "prompt:images");
+  const imageSanitization: ImageSanitizationLimits = {
+    maxDimensionPx: params.maxDimensionPx,
+  };
+  const sanitizedPromptImages = await sanitizeImagesWithLog(
+    promptImages,
+    "prompt:images",
+    imageSanitization,
+  );
   const sanitizedHistoryImagesByIndex = new Map<number, ImageContent[]>();
   for (const [index, images] of historyImagesByIndex) {
-    const sanitized = await sanitizeImagesWithLog(images, `history:images:${index}`);
+    const sanitized = await sanitizeImagesWithLog(
+      images,
+      `history:images:${index}`,
+      imageSanitization,
+    );
     if (sanitized.length > 0) {
       sanitizedHistoryImagesByIndex.set(index, sanitized);
     }

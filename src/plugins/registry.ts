@@ -6,7 +6,11 @@ import type {
   GatewayRequestHandler,
   GatewayRequestHandlers,
 } from "../gateway/server-methods/types.js";
+import { registerInternalHook } from "../hooks/internal-hooks.js";
 import type { HookEntry } from "../hooks/types.js";
+import { resolveUserPath } from "../utils.js";
+import { registerPluginCommand } from "./commands.js";
+import { normalizePluginHttpPath } from "./http-path.js";
 import type { PluginRuntime } from "./runtime/types.js";
 import type {
   OpenClawPluginApi,
@@ -29,10 +33,6 @@ import type {
   PluginHookHandlerMap,
   PluginHookRegistration as TypedPluginHookRegistration,
 } from "./types.js";
-import { registerInternalHook } from "../hooks/internal-hooks.js";
-import { resolveUserPath, CONFIG_DIR } from "../utils.js";
-import { registerPluginCommand } from "./commands.js";
-import { normalizePluginHttpPath } from "./http-path.js";
 
 export type PluginToolRegistration = {
   pluginId: string;
@@ -143,8 +143,8 @@ export type PluginRegistryParams = {
   runtime: PluginRuntime;
 };
 
-export function createPluginRegistry(registryParams: PluginRegistryParams) {
-  const registry: PluginRegistry = {
+export function createEmptyPluginRegistry(): PluginRegistry {
+  return {
     plugins: [],
     tools: [],
     hooks: [],
@@ -159,6 +159,10 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     commands: [],
     diagnostics: [],
   };
+}
+
+export function createPluginRegistry(registryParams: PluginRegistryParams) {
+  const registry = createEmptyPluginRegistry();
   const coreGatewayMethods = new Set(Object.keys(registryParams.coreGatewayHandlers ?? {}));
 
   const pushDiagnostic = (diag: PluginDiagnostic) => {
@@ -493,16 +497,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       registerCli: (registrar, opts) => registerCli(record, registrar, opts),
       registerService: (service) => registerService(record, service),
       registerCommand: (command) => registerCommand(record, command),
-      resolvePath: (input: string) => {
-        const trimmed = input.trim();
-        if (!trimmed) return trimmed;
-        // Absolute paths or ~ paths: resolve as-is
-        if (trimmed.startsWith("/") || trimmed.startsWith("~")) {
-          return resolveUserPath(trimmed);
-        }
-        // Relative paths: resolve within the state directory (CONFIG_DIR)
-        return path.join(CONFIG_DIR, trimmed);
-      },
+      resolvePath: (input: string) => resolveUserPath(input),
       on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),
     };
   };
