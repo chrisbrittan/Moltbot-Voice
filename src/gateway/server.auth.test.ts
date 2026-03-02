@@ -121,6 +121,13 @@ const NODE_CLIENT = {
   mode: GATEWAY_CLIENT_MODES.NODE,
 };
 
+const BACKEND_GATEWAY_CLIENT = {
+  id: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
+  version: "1.0.0",
+  platform: "node",
+  mode: GATEWAY_CLIENT_MODES.BACKEND,
+};
+
 async function expectHelloOkServerVersion(port: number, expectedVersion: string) {
   const ws = await openWs(port);
   try {
@@ -253,7 +260,13 @@ async function sendRawConnectReq(
     id?: string;
     ok?: boolean;
     payload?: Record<string, unknown> | null;
-    error?: { message?: string };
+    error?: {
+      message?: string;
+      details?: {
+        code?: string;
+        reason?: string;
+      };
+    };
   }>(ws, isConnectResMessage(params.id));
 }
 
@@ -416,13 +429,14 @@ describe("gateway server auth/connect", () => {
         opts: Parameters<typeof connectReq>[1];
         expectConnectOk: boolean;
         expectConnectError?: string;
+        expectStatusOk?: boolean;
         expectStatusError?: string;
       }> = [
         {
-          name: "operator + valid shared token => connected with zero scopes",
+          name: "operator + valid shared token => connected with preserved scopes",
           opts: { role: "operator", token, device: null },
           expectConnectOk: true,
-          expectStatusError: "missing scope",
+          expectStatusOk: true,
         },
         {
           name: "node + valid shared token => rejected without device",
@@ -449,12 +463,14 @@ describe("gateway server auth/connect", () => {
             );
             continue;
           }
-          if (scenario.expectStatusError) {
+          if (scenario.expectStatusOk !== undefined) {
             const status = await rpcReq(ws, "status");
-            expect(status.ok, scenario.name).toBe(false);
-            expect(status.error?.message ?? "", scenario.name).toContain(
-              scenario.expectStatusError,
-            );
+            expect(status.ok, scenario.name).toBe(scenario.expectStatusOk);
+            if (!scenario.expectStatusOk && scenario.expectStatusError) {
+              expect(status.error?.message ?? "", scenario.name).toContain(
+                scenario.expectStatusError,
+              );
+            }
           }
         } finally {
           ws.close();
@@ -545,6 +561,10 @@ describe("gateway server auth/connect", () => {
       });
       expect(connectRes.ok).toBe(false);
       expect(connectRes.error?.message ?? "").toContain("device signature invalid");
+      expect(connectRes.error?.details?.code).toBe(
+        ConnectErrorDetailCodes.DEVICE_AUTH_SIGNATURE_INVALID,
+      );
+      expect(connectRes.error?.details?.reason).toBe("device-signature");
       await new Promise<void>((resolve) => ws.once("close", () => resolve()));
     });
 
@@ -607,6 +627,58 @@ describe("gateway server auth/connect", () => {
       });
       expect(res.ok).toBe(false);
       expect(res.error?.message ?? "").toContain("must have required property 'nonce'");
+      await new Promise<void>((resolve) => ws.once("close", () => resolve()));
+    });
+
+    test("returns nonce-required detail code when nonce is blank", async () => {
+      const ws = await openWs(port);
+      const token = resolveGatewayTokenOrEnv();
+      const nonce = await readConnectChallengeNonce(ws);
+      const { device } = await createSignedDevice({
+        token,
+        scopes: ["operator.admin"],
+        clientId: TEST_OPERATOR_CLIENT.id,
+        clientMode: TEST_OPERATOR_CLIENT.mode,
+        nonce,
+      });
+
+      const connectRes = await sendRawConnectReq(ws, {
+        id: "c-blank-nonce",
+        token,
+        device: { ...device, nonce: "   " },
+      });
+      expect(connectRes.ok).toBe(false);
+      expect(connectRes.error?.message ?? "").toContain("device nonce required");
+      expect(connectRes.error?.details?.code).toBe(
+        ConnectErrorDetailCodes.DEVICE_AUTH_NONCE_REQUIRED,
+      );
+      expect(connectRes.error?.details?.reason).toBe("device-nonce-missing");
+      await new Promise<void>((resolve) => ws.once("close", () => resolve()));
+    });
+
+    test("returns nonce-mismatch detail code when nonce does not match challenge", async () => {
+      const ws = await openWs(port);
+      const token = resolveGatewayTokenOrEnv();
+      const nonce = await readConnectChallengeNonce(ws);
+      const { device } = await createSignedDevice({
+        token,
+        scopes: ["operator.admin"],
+        clientId: TEST_OPERATOR_CLIENT.id,
+        clientMode: TEST_OPERATOR_CLIENT.mode,
+        nonce,
+      });
+
+      const connectRes = await sendRawConnectReq(ws, {
+        id: "c-wrong-nonce",
+        token,
+        device: { ...device, nonce: `${nonce}-stale` },
+      });
+      expect(connectRes.ok).toBe(false);
+      expect(connectRes.error?.message ?? "").toContain("device nonce mismatch");
+      expect(connectRes.error?.details?.code).toBe(
+        ConnectErrorDetailCodes.DEVICE_AUTH_NONCE_MISMATCH,
+      );
+      expect(connectRes.error?.details?.reason).toBe("device-nonce-mismatch");
       await new Promise<void>((resolve) => ws.once("close", () => resolve()));
     });
 
@@ -811,8 +883,7 @@ describe("gateway server auth/connect", () => {
       const res = await connectReq(ws, { token: "secret", device: null });
       expect(res.ok).toBe(true);
       const status = await rpcReq(ws, "status");
-      expect(status.ok).toBe(false);
-      expect(status.error?.message).toContain("missing scope");
+      expect(status.ok).toBe(true);
       const health = await rpcReq(ws, "health");
       expect(health.ok).toBe(true);
       ws.close();
@@ -896,8 +967,7 @@ describe("gateway server auth/connect", () => {
         }
         if (tc.expectStatusChecks) {
           const status = await rpcReq(ws, "status");
-          expect(status.ok).toBe(false);
-          expect(status.error?.message ?? "").toContain("missing scope");
+          expect(status.ok).toBe(true);
           const health = await rpcReq(ws, "health");
           expect(health.ok).toBe(true);
         }
@@ -923,8 +993,7 @@ describe("gateway server auth/connect", () => {
     });
     expect(res.ok).toBe(true);
     const status = await rpcReq(ws, "status");
-    expect(status.ok).toBe(false);
-    expect(status.error?.message ?? "").toContain("missing scope");
+    expect(status.ok).toBe(true);
     const health = await rpcReq(ws, "health");
     expect(health.ok).toBe(true);
     ws.close();
@@ -946,8 +1015,7 @@ describe("gateway server auth/connect", () => {
       });
       expect(res.ok).toBe(true);
       const status = await rpcReq(ws, "status");
-      expect(status.ok).toBe(false);
-      expect(status.error?.message ?? "").toContain("missing scope");
+      expect(status.ok).toBe(true);
       const health = await rpcReq(ws, "health");
       expect(health.ok).toBe(true);
       ws.close();
@@ -1727,6 +1795,39 @@ describe("gateway server auth/connect", () => {
       delete process.env.OPENCLAW_GATEWAY_TOKEN;
     } else {
       process.env.OPENCLAW_GATEWAY_TOKEN = prevToken;
+    }
+  });
+
+  test("allows local gateway backend shared-auth connections without device pairing", async () => {
+    const { server, ws, prevToken } = await startServerWithClient("secret");
+    try {
+      const localBackend = await connectReq(ws, {
+        token: "secret",
+        client: BACKEND_GATEWAY_CLIENT,
+      });
+      expect(localBackend.ok).toBe(true);
+    } finally {
+      ws.close();
+      await server.close();
+      restoreGatewayToken(prevToken);
+    }
+  });
+
+  test("requires pairing for gateway backend clients when connection is not local-direct", async () => {
+    const { server, ws, port, prevToken } = await startServerWithClient("secret");
+    ws.close();
+    const wsRemoteLike = await openWs(port, { host: "gateway.example" });
+    try {
+      const remoteLikeBackend = await connectReq(wsRemoteLike, {
+        token: "secret",
+        client: BACKEND_GATEWAY_CLIENT,
+      });
+      expect(remoteLikeBackend.ok).toBe(false);
+      expect(remoteLikeBackend.error?.message ?? "").toContain("pairing required");
+    } finally {
+      wsRemoteLike.close();
+      await server.close();
+      restoreGatewayToken(prevToken);
     }
   });
 
