@@ -200,11 +200,7 @@ function readBundledPluginManifestRecordFromDir(params: {
     return null;
   }
   try {
-    const raw = JSON5.parse(fs.readFileSync(manifestPath, "utf8")) as {
-      id?: unknown;
-      enabledByDefault?: unknown;
-      channels?: unknown;
-    };
+    const raw = JSON5.parse(fs.readFileSync(manifestPath, "utf8"));
     if (typeof raw.id !== "string" || raw.id.trim().length === 0) {
       return null;
     }
@@ -214,7 +210,7 @@ function readBundledPluginManifestRecordFromDir(params: {
       enabledByDefault: raw.enabledByDefault === true,
       rootDir: path.join(params.pluginsRoot, params.resolvedDirName),
       channels: Array.isArray(raw.channels)
-        ? raw.channels.filter((entry): entry is string => typeof entry === "string")
+        ? (raw.channels as unknown[]).filter((entry): entry is string => typeof entry === "string")
         : [],
     };
   } catch {

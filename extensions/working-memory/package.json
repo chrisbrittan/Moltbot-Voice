@@ -1,15 +1,15 @@
 {
   "name": "@moltbot/working-memory",
   "version": "2026.1.27-beta.1",
-  "type": "module",
   "description": "Working Memory plugin - protected context layer for PA brain (identity, active context, facts, integrations)",
+  "type": "module",
   "dependencies": {
     "@sinclair/typebox": "0.34.47"
   },
   "devDependencies": {
-    "moltbot": "workspace:*"
+    "openclaw": "workspace:*"
   },
-  "moltbot": {
+  "openclaw": {
     "extensions": [
       "./index.ts"
     ]

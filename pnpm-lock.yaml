@@ -1236,6 +1236,16 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/working-memory:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.49
+        version: 0.34.49
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/xai:
     devDependencies:
       '@openclaw/plugin-sdk':
@@ -1253,16 +1263,6 @@ importers:
       '@openclaw/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
-
-  extensions/working-memory:
-    dependencies:
-      '@sinclair/typebox':
-        specifier: 0.34.48
-        version: 0.34.48
-    devDependencies:
-      moltbot:
-        specifier: workspace:*
-        version: link:../../packages/moltbot
 
   extensions/zalo:
     dependencies:
