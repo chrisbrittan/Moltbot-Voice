@@ -1,287 +1,174 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
-import { withTempHome } from "./home-env.test-harness.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
+import { createSuiteTempRootTracker } from "../test-helpers/temp-dir.js";
 import { createConfigIO } from "./io.js";
 
+// Mock the plugin manifest registry so we can register a fake channel whose
+// AJV JSON Schema carries a `default` value.  This lets the #56772 regression
+// test exercise the exact code path that caused the bug: AJV injecting
+// defaults during the write-back validation pass.
+const mockLoadPluginManifestRegistry = vi.hoisted(() =>
+  vi.fn(
+    (): PluginManifestRegistry => ({
+      diagnostics: [],
+      plugins: [],
+    }),
+  ),
+);
+const mockMaintainConfigBackups = vi.hoisted(() =>
+  vi.fn<typeof import("./backup-rotation.js").maintainConfigBackups>(async () => {}),
+);
+
+vi.mock("../plugins/manifest-registry.js", () => ({
+  loadPluginManifestRegistry: mockLoadPluginManifestRegistry,
+}));
+
+vi.mock("../plugins/doctor-contract-registry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../plugins/doctor-contract-registry.js")>();
+  return {
+    ...actual,
+    listPluginDoctorLegacyConfigRules: () => [],
+    applyPluginDoctorCompatibilityMigrations: () => ({ next: null, changes: [] }),
+  };
+});
+
+vi.mock("./backup-rotation.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./backup-rotation.js")>();
+  return {
+    ...actual,
+    maintainConfigBackups: mockMaintainConfigBackups,
+  };
+});
+
 describe("config io write", () => {
+  const suiteRootTracker = createSuiteTempRootTracker({ prefix: "openclaw-config-io-" });
   const silentLogger = {
     warn: () => {},
     error: () => {},
   };
 
-  async function writeConfigAndCreateIo(params: {
-    home: string;
-    initialConfig: Record<string, unknown>;
-    env?: NodeJS.ProcessEnv;
-    logger?: { warn: (msg: string) => void; error: (msg: string) => void };
-  }) {
-    const configPath = path.join(params.home, ".openclaw", "openclaw.json");
-    await fs.mkdir(path.dirname(configPath), { recursive: true });
-    await fs.writeFile(configPath, JSON.stringify(params.initialConfig, null, 2), "utf-8");
-
-    const io = createConfigIO({
-      env: params.env ?? {},
-      homedir: () => params.home,
-      logger: params.logger ?? silentLogger,
-    });
-    const snapshot = await io.readConfigFileSnapshot();
-    expect(snapshot.valid).toBe(true);
-    return { configPath, io, snapshot };
+  async function withSuiteHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+    const home = await suiteRootTracker.make("case");
+    return fn(home);
   }
 
-  async function writeTokenAuthAndReadConfig(params: {
-    io: { writeConfigFile: (config: Record<string, unknown>) => Promise<void> };
-    snapshot: { config: Record<string, unknown> };
-    configPath: string;
-  }) {
-    const next = structuredClone(params.snapshot.config);
-    const gateway =
-      next.gateway && typeof next.gateway === "object"
-        ? (next.gateway as Record<string, unknown>)
-        : {};
-    next.gateway = {
-      ...gateway,
-      auth: { mode: "token" },
+  beforeAll(async () => {
+    await suiteRootTracker.setup();
+
+    // Default: return an empty plugin list so existing tests that don't need
+    // plugin-owned channel schemas keep working unchanged.
+    mockLoadPluginManifestRegistry.mockReturnValue({
+      diagnostics: [],
+      plugins: [],
+    } satisfies PluginManifestRegistry);
+  });
+
+  afterAll(async () => {
+    await suiteRootTracker.cleanup();
+  });
+
+  const expectInputOwnerDisplayUnchanged = (input: Record<string, unknown>) => {
+    expect((input.commands as Record<string, unknown>).ownerDisplay).toBe("hash");
+  };
+
+  const readPersistedCommands = async (configPath: string) => {
+    const persisted = JSON.parse(await fs.readFile(configPath, "utf-8")) as {
+      commands?: Record<string, unknown>;
     };
-    await params.io.writeConfigFile(next);
-    return JSON.parse(await fs.readFile(params.configPath, "utf-8")) as Record<string, unknown>;
-  }
+    return persisted.commands;
+  };
 
-  async function writeGatewayPatchAndReadLastAuditEntry(params: {
-    home: string;
-    initialConfig: Record<string, unknown>;
-    gatewayPatch: Record<string, unknown>;
-    env?: NodeJS.ProcessEnv;
-  }) {
-    const { io, snapshot, configPath } = await writeConfigAndCreateIo({
-      home: params.home,
-      initialConfig: params.initialConfig,
-      env: params.env,
-      logger: {
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-    });
-    const auditPath = path.join(params.home, ".openclaw", "logs", "config-audit.jsonl");
-    const next = structuredClone(snapshot.config);
-    const gateway =
-      next.gateway && typeof next.gateway === "object"
-        ? (next.gateway as Record<string, unknown>)
-        : {};
-    next.gateway = {
-      ...gateway,
-      ...params.gatewayPatch,
-    };
-    await io.writeConfigFile(next);
-    const lines = (await fs.readFile(auditPath, "utf-8")).trim().split("\n").filter(Boolean);
-    const last = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
-    return { last, lines, configPath };
-  }
+  it.runIf(process.platform !== "win32")(
+    "tightens world-writable state dir when writing the default config",
+    async () => {
+      await withSuiteHome(async (home) => {
+        const stateDir = path.join(home, ".openclaw");
+        await fs.mkdir(stateDir, { recursive: true, mode: 0o777 });
+        await fs.chmod(stateDir, 0o777);
 
-  it("persists caller changes onto resolved config without leaking runtime defaults", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
-      const { configPath, io, snapshot } = await writeConfigAndCreateIo({
-        home,
-        initialConfig: { gateway: { port: 18789 } },
+        const io = createConfigIO({
+          env: {} as NodeJS.ProcessEnv,
+          homedir: () => home,
+          logger: silentLogger,
+        });
+
+        await io.writeConfigFile({ gateway: { mode: "local" } });
+
+        const stat = await fs.stat(stateDir);
+        expect(stat.mode & 0o777).toBe(0o700);
       });
-      const persisted = await writeTokenAuthAndReadConfig({ io, snapshot, configPath });
-      expect(persisted.gateway).toEqual({
-        port: 18789,
-        auth: { mode: "token" },
-      });
-      expect(persisted).not.toHaveProperty("agents.defaults");
-      expect(persisted).not.toHaveProperty("messages.ackReaction");
-      expect(persisted).not.toHaveProperty("sessions.persistence");
-    });
-  });
+    },
+  );
 
-  it("preserves env var references when writing", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
-      const { configPath, io, snapshot } = await writeConfigAndCreateIo({
-        home,
-        env: { OPENAI_API_KEY: "sk-secret" } as NodeJS.ProcessEnv,
-        initialConfig: {
-          agents: {
-            defaults: {
-              cliBackends: {
-                codex: {
-                  command: "codex",
-                  env: {
-                    OPENAI_API_KEY: "${OPENAI_API_KEY}",
-                  },
-                },
-              },
-            },
-          },
-          gateway: { port: 18789 },
-        },
-      });
-      const persisted = (await writeTokenAuthAndReadConfig({ io, snapshot, configPath })) as {
-        agents: { defaults: { cliBackends: { codex: { env: { OPENAI_API_KEY: string } } } } };
-        gateway: { port: number; auth: { mode: string } };
-      };
-      expect(persisted.agents.defaults.cliBackends.codex.env.OPENAI_API_KEY).toBe(
-        "${OPENAI_API_KEY}",
-      );
-      expect(persisted.gateway).toEqual({
-        port: 18789,
-        auth: { mode: "token" },
-      });
-    });
-  });
-
-  it("does not reintroduce Slack/Discord legacy dm.policy defaults when writing", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
-      const { configPath, io, snapshot } = await writeConfigAndCreateIo({
-        home,
-        initialConfig: {
-          channels: {
-            discord: {
-              dmPolicy: "pairing",
-              dm: { enabled: true, policy: "pairing" },
-            },
-            slack: {
-              dmPolicy: "pairing",
-              dm: { enabled: true, policy: "pairing" },
-            },
-          },
-          gateway: { port: 18789 },
-        },
-      });
-
-      const next = structuredClone(snapshot.config);
-      // Simulate doctor removing legacy keys while keeping dm enabled.
-      if (next.channels?.discord?.dm && typeof next.channels.discord.dm === "object") {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test helper
-        delete (next.channels.discord.dm as any).policy;
-      }
-      if (next.channels?.slack?.dm && typeof next.channels.slack.dm === "object") {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test helper
-        delete (next.channels.slack.dm as any).policy;
-      }
-
-      await io.writeConfigFile(next);
-
-      const persisted = JSON.parse(await fs.readFile(configPath, "utf-8")) as {
-        channels?: {
-          discord?: { dm?: Record<string, unknown>; dmPolicy?: unknown };
-          slack?: { dm?: Record<string, unknown>; dmPolicy?: unknown };
-        };
-      };
-
-      expect(persisted.channels?.discord?.dmPolicy).toBe("pairing");
-      expect(persisted.channels?.discord?.dm).toEqual({ enabled: true });
-      expect(persisted.channels?.slack?.dmPolicy).toBe("pairing");
-      expect(persisted.channels?.slack?.dm).toEqual({ enabled: true });
-    });
-  });
-
-  it("keeps env refs in arrays when appending entries", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
-      const configPath = path.join(home, ".openclaw", "openclaw.json");
-      await fs.mkdir(path.dirname(configPath), { recursive: true });
+  it("keeps writes inside an OPENCLAW_STATE_DIR override even when the real home config exists", async () => {
+    await withSuiteHome(async (home) => {
+      const liveConfigPath = path.join(home, ".openclaw", "openclaw.json");
+      await fs.mkdir(path.dirname(liveConfigPath), { recursive: true });
       await fs.writeFile(
-        configPath,
-        JSON.stringify(
-          {
-            agents: {
-              defaults: {
-                cliBackends: {
-                  codex: {
-                    command: "codex",
-                    args: ["${DISCORD_USER_ID}", "123"],
-                  },
-                },
-              },
-            },
-          },
-          null,
-          2,
-        ),
+        liveConfigPath,
+        `${JSON.stringify({ gateway: { mode: "local", port: 18789 } }, null, 2)}\n`,
         "utf-8",
       );
 
+      const overrideDir = path.join(home, "isolated-state");
+      const env = { OPENCLAW_STATE_DIR: overrideDir } as NodeJS.ProcessEnv;
       const io = createConfigIO({
-        env: { DISCORD_USER_ID: "999" } as NodeJS.ProcessEnv,
+        env,
         homedir: () => home,
         logger: silentLogger,
       });
 
-      const snapshot = await io.readConfigFileSnapshot();
-      expect(snapshot.valid).toBe(true);
+      expect(io.configPath).toBe(path.join(overrideDir, "openclaw.json"));
 
-      const next = structuredClone(snapshot.config);
-      const codexBackend = next.agents?.defaults?.cliBackends?.codex;
-      const args = Array.isArray(codexBackend?.args) ? codexBackend?.args : [];
-      next.agents = {
-        ...next.agents,
-        defaults: {
-          ...next.agents?.defaults,
-          cliBackends: {
-            ...next.agents?.defaults?.cliBackends,
-            codex: {
-              ...codexBackend,
-              command: typeof codexBackend?.command === "string" ? codexBackend.command : "codex",
-              args: [...args, "456"],
-            },
-          },
-        },
+      await io.writeConfigFile({
+        agents: { list: [{ id: "main", default: true }] },
+        gateway: { mode: "local" },
+        session: { mainKey: "main", store: path.join(overrideDir, "sessions.json") },
+      });
+
+      const livePersisted = JSON.parse(await fs.readFile(liveConfigPath, "utf-8")) as {
+        gateway?: { mode?: unknown; port?: unknown };
       };
+      expect(livePersisted.gateway).toEqual({ mode: "local", port: 18789 });
 
-      await io.writeConfigFile(next);
-
-      const persisted = JSON.parse(await fs.readFile(configPath, "utf-8")) as {
-        agents: {
-          defaults: {
-            cliBackends: {
-              codex: {
-                args: string[];
-              };
-            };
-          };
-        };
+      const overridePersisted = JSON.parse(
+        await fs.readFile(path.join(overrideDir, "openclaw.json"), "utf-8"),
+      ) as {
+        session?: { store?: unknown };
       };
-      expect(persisted.agents.defaults.cliBackends.codex.args).toEqual([
-        "${DISCORD_USER_ID}",
-        "123",
-        "456",
-      ]);
+      expect(overridePersisted.session?.store).toBe(path.join(overrideDir, "sessions.json"));
     });
   });
 
-  it("logs an overwrite audit entry when replacing an existing config file", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
-      const warn = vi.fn();
-      const { configPath, io, snapshot } = await writeConfigAndCreateIo({
-        home,
-        initialConfig: { gateway: { port: 18789 } },
+  it("does not mutate caller config when unsetPaths is applied on first write", async () => {
+    await withSuiteHome(async (home) => {
+      const configPath = path.join(home, ".openclaw", "openclaw.json");
+      const io = createConfigIO({
         env: {} as NodeJS.ProcessEnv,
-        logger: {
-          warn: warn as (msg: string) => void,
-          error: vi.fn() as (msg: string) => void,
-        },
+        homedir: () => home,
+        logger: silentLogger,
       });
-      const next = structuredClone(snapshot.config);
-      next.gateway = {
-        ...next.gateway,
-        auth: { mode: "token" },
+
+      const input: Record<string, unknown> = {
+        gateway: { mode: "local" },
+        commands: { ownerDisplay: "hash" },
       };
 
-      await io.writeConfigFile(next);
+      await io.writeConfigFile(input, { unsetPaths: [["commands", "ownerDisplay"]] });
 
-      const overwriteLog = warn.mock.calls
-        .map((call) => call[0])
-        .find((entry) => typeof entry === "string" && entry.startsWith("Config overwrite:"));
-      expect(typeof overwriteLog).toBe("string");
-      expect(overwriteLog).toContain(configPath);
-      expect(overwriteLog).toContain(`${configPath}.bak`);
-      expect(overwriteLog).toContain("sha256");
+      expect(input).toEqual({
+        gateway: { mode: "local" },
+        commands: { ownerDisplay: "hash" },
+      });
+      expectInputOwnerDisplayUnchanged(input);
+      expect((await readPersistedCommands(configPath)) ?? {}).not.toHaveProperty("ownerDisplay");
     });
   });
 
   it("does not log an overwrite audit entry when creating config for the first time", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
+    await withSuiteHome(async (home) => {
       const warn = vi.fn();
       const io = createConfigIO({
         env: {} as NodeJS.ProcessEnv,
@@ -303,41 +190,57 @@ describe("config io write", () => {
     });
   });
 
-  it("appends config write audit JSONL entries with forensic metadata", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
-      const { configPath, lines, last } = await writeGatewayPatchAndReadLastAuditEntry({
-        home,
-        initialConfig: { gateway: { port: 18789 } },
-        gatewayPatch: { mode: "local" },
-        env: {} as NodeJS.ProcessEnv,
-      });
-      expect(lines.length).toBeGreaterThan(0);
-      expect(last.source).toBe("config-io");
-      expect(last.event).toBe("config.write");
-      expect(last.configPath).toBe(configPath);
-      expect(last.existsBefore).toBe(true);
-      expect(last.hasMetaAfter).toBe(true);
-      expect(last.previousHash).toBeTypeOf("string");
-      expect(last.nextHash).toBeTypeOf("string");
-      expect(last.result === "rename" || last.result === "copy-fallback").toBe(true);
-    });
-  });
+  it("writes disabled plugin entries without requiring plugin config", async () => {
+    mockLoadPluginManifestRegistry.mockReturnValue({
+      diagnostics: [],
+      plugins: [
+        {
+          id: "required-plugin",
+          origin: "bundled",
+          channels: [],
+          providers: [],
+          cliBackends: [],
+          skills: [],
+          hooks: [],
+          rootDir: "/tmp/openclaw-test-required-plugin",
+          source: "/tmp/openclaw-test-required-plugin/index.ts",
+          manifestPath: "/tmp/openclaw-test-required-plugin/openclaw.plugin.json",
+          configSchema: {
+            type: "object",
+            properties: {
+              token: { type: "string" },
+            },
+            required: ["token"],
+            additionalProperties: true,
+          },
+        },
+      ],
+    } satisfies PluginManifestRegistry);
 
-  it("records gateway watch session markers in config audit entries", async () => {
-    await withTempHome("openclaw-config-io-", async (home) => {
-      const { last } = await writeGatewayPatchAndReadLastAuditEntry({
-        home,
-        initialConfig: { gateway: { mode: "local" } },
-        gatewayPatch: { bind: "loopback" },
-        env: {
-          OPENCLAW_WATCH_MODE: "1",
-          OPENCLAW_WATCH_SESSION: "watch-session-1",
-          OPENCLAW_WATCH_COMMAND: "gateway --force",
-        } as NodeJS.ProcessEnv,
+    await withSuiteHome(async (home) => {
+      const io = createConfigIO({
+        env: { VITEST: "true" } as NodeJS.ProcessEnv,
+        homedir: () => home,
+        logger: silentLogger,
       });
-      expect(last.watchMode).toBe(true);
-      expect(last.watchSession).toBe("watch-session-1");
-      expect(last.watchCommand).toBe("gateway --force");
+
+      await expect(
+        io.writeConfigFile({
+          agents: { list: [{ id: "main", default: true }] },
+          plugins: {
+            entries: {
+              "required-plugin": {
+                enabled: false,
+              },
+            },
+          },
+        }),
+      ).resolves.toEqual({ persistedHash: expect.any(String) });
     });
+
+    mockLoadPluginManifestRegistry.mockReturnValue({
+      diagnostics: [],
+      plugins: [],
+    } satisfies PluginManifestRegistry);
   });
 });

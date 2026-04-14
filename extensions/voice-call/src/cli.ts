@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { format } from "node:util";
 import type { Command } from "commander";
-import { sleep } from "openclaw/plugin-sdk";
+import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/text-runtime";
+import { sleep } from "../api.js";
 import type { VoiceCallConfig } from "./config.js";
 import type { VoiceCallRuntime } from "./runtime.js";
 import { resolveUserPath } from "./utils.js";
@@ -10,7 +12,7 @@ import {
   cleanupTailscaleExposureRoute,
   getTailscaleSelfInfo,
   setupTailscaleExposureRoute,
-} from "./webhook.js";
+} from "./webhook/tailscale.js";
 
 type Logger = {
   info: (message: string) => void;
@@ -18,8 +20,16 @@ type Logger = {
   error: (message: string) => void;
 };
 
+function writeStdoutLine(...values: unknown[]): void {
+  process.stdout.write(`${format(...values)}\n`);
+}
+
+function writeStdoutJson(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
 function resolveMode(input: string): "off" | "serve" | "funnel" {
-  const raw = input.trim().toLowerCase();
+  const raw = normalizeOptionalLowercaseString(input) ?? "";
   if (raw === "serve" || raw === "off") {
     return raw;
   }
@@ -45,7 +55,7 @@ function percentile(values: number[], p: number): number {
   if (values.length === 0) {
     return 0;
   }
-  const sorted = [...values].sort((a, b) => a - b);
+  const sorted = [...values].toSorted((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
   return sorted[idx] ?? 0;
 }
@@ -81,6 +91,26 @@ function summarizeSeries(values: number[]): {
   };
 }
 
+function resolveCallMode(mode?: string): "notify" | "conversation" | undefined {
+  return mode === "notify" || mode === "conversation" ? mode : undefined;
+}
+
+async function initiateCallAndPrintId(params: {
+  runtime: VoiceCallRuntime;
+  to: string;
+  message?: string;
+  mode?: string;
+}) {
+  const result = await params.runtime.manager.initiateCall(params.to, undefined, {
+    message: params.message,
+    mode: resolveCallMode(params.mode),
+  });
+  if (!result.success) {
+    throw new Error(result.error || "initiate failed");
+  }
+  writeStdoutJson({ callId: result.callId });
+}
+
 export function registerVoiceCallCli(params: {
   program: Command;
   config: VoiceCallConfig;
@@ -112,16 +142,12 @@ export function registerVoiceCallCli(params: {
       if (!to) {
         throw new Error("Missing --to and no toNumber configured");
       }
-      const result = await rt.manager.initiateCall(to, undefined, {
+      await initiateCallAndPrintId({
+        runtime: rt,
+        to,
         message: options.message,
-        mode:
-          options.mode === "notify" || options.mode === "conversation" ? options.mode : undefined,
+        mode: options.mode,
       });
-      if (!result.success) {
-        throw new Error(result.error || "initiate failed");
-      }
-      // eslint-disable-next-line no-console
-      console.log(JSON.stringify({ callId: result.callId }, null, 2));
     });
 
   root
@@ -136,16 +162,12 @@ export function registerVoiceCallCli(params: {
     )
     .action(async (options: { to: string; message?: string; mode?: string }) => {
       const rt = await ensureRuntime();
-      const result = await rt.manager.initiateCall(options.to, undefined, {
+      await initiateCallAndPrintId({
+        runtime: rt,
+        to: options.to,
         message: options.message,
-        mode:
-          options.mode === "notify" || options.mode === "conversation" ? options.mode : undefined,
+        mode: options.mode,
       });
-      if (!result.success) {
-        throw new Error(result.error || "initiate failed");
-      }
-      // eslint-disable-next-line no-console
-      console.log(JSON.stringify({ callId: result.callId }, null, 2));
     });
 
   root
@@ -159,8 +181,7 @@ export function registerVoiceCallCli(params: {
       if (!result.success) {
         throw new Error(result.error || "continue failed");
       }
-      // eslint-disable-next-line no-console
-      console.log(JSON.stringify(result, null, 2));
+      writeStdoutJson(result);
     });
 
   root
@@ -174,8 +195,7 @@ export function registerVoiceCallCli(params: {
       if (!result.success) {
         throw new Error(result.error || "speak failed");
       }
-      // eslint-disable-next-line no-console
-      console.log(JSON.stringify(result, null, 2));
+      writeStdoutJson(result);
     });
 
   root
@@ -188,8 +208,7 @@ export function registerVoiceCallCli(params: {
       if (!result.success) {
         throw new Error(result.error || "end failed");
       }
-      // eslint-disable-next-line no-console
-      console.log(JSON.stringify(result, null, 2));
+      writeStdoutJson(result);
     });
 
   root
@@ -199,8 +218,7 @@ export function registerVoiceCallCli(params: {
     .action(async (options: { callId: string }) => {
       const rt = await ensureRuntime();
       const call = rt.manager.getCall(options.callId);
-      // eslint-disable-next-line no-console
-      console.log(JSON.stringify(call ?? { found: false }, null, 2));
+      writeStdoutJson(call ?? { found: false });
     });
 
   root
@@ -222,8 +240,7 @@ export function registerVoiceCallCli(params: {
       const initial = fs.readFileSync(file, "utf8");
       const lines = initial.split("\n").filter(Boolean);
       for (const line of lines.slice(Math.max(0, lines.length - since))) {
-        // eslint-disable-next-line no-console
-        console.log(line);
+        writeStdoutLine(line);
       }
 
       let offset = Buffer.byteLength(initial, "utf8");
@@ -242,8 +259,7 @@ export function registerVoiceCallCli(params: {
               offset = stat.size;
               const text = buf.toString("utf8");
               for (const line of text.split("\n").filter(Boolean)) {
-                // eslint-disable-next-line no-console
-                console.log(line);
+                writeStdoutLine(line);
               }
             } finally {
               fs.closeSync(fd);
@@ -293,18 +309,11 @@ export function registerVoiceCallCli(params: {
         }
       }
 
-      // eslint-disable-next-line no-console
-      console.log(
-        JSON.stringify(
-          {
-            recordsScanned: lines.length,
-            turnLatency: summarizeSeries(turnLatencyMs),
-            listenWait: summarizeSeries(listenWaitMs),
-          },
-          null,
-          2,
-        ),
-      );
+      writeStdoutJson({
+        recordsScanned: lines.length,
+        turnLatency: summarizeSeries(turnLatencyMs),
+        listenWait: summarizeSeries(listenWaitMs),
+      });
     });
 
   root
@@ -318,16 +327,15 @@ export function registerVoiceCallCli(params: {
       async (options: { mode?: string; port?: string; path?: string; servePath?: string }) => {
         const mode = resolveMode(options.mode ?? "funnel");
         const servePort = Number(options.port ?? config.serve.port ?? 3334);
-        const servePath = String(options.servePath ?? config.serve.path ?? "/voice/webhook");
-        const tsPath = String(options.path ?? config.tailscale?.path ?? servePath);
+        const servePath = options.servePath ?? config.serve.path ?? "/voice/webhook";
+        const tsPath = options.path ?? config.tailscale?.path ?? servePath;
 
         const localUrl = `http://127.0.0.1:${servePort}`;
 
         if (mode === "off") {
           await cleanupTailscaleExposureRoute({ mode: "serve", path: tsPath });
           await cleanupTailscaleExposureRoute({ mode: "funnel", path: tsPath });
-          // eslint-disable-next-line no-console
-          console.log(JSON.stringify({ ok: true, mode: "off", path: tsPath }, null, 2));
+          writeStdoutJson({ ok: true, mode: "off", path: tsPath });
           return;
         }
 
@@ -342,26 +350,19 @@ export function registerVoiceCallCli(params: {
           ? `https://login.tailscale.com/f/${mode}?node=${tsInfo.nodeId}`
           : null;
 
-        // eslint-disable-next-line no-console
-        console.log(
-          JSON.stringify(
-            {
-              ok: Boolean(publicUrl),
-              mode,
-              path: tsPath,
-              localUrl,
-              publicUrl,
-              hint: publicUrl
-                ? undefined
-                : {
-                    note: "Tailscale serve/funnel may be disabled on this tailnet (or require admin enable).",
-                    enableUrl,
-                  },
-            },
-            null,
-            2,
-          ),
-        );
+        writeStdoutJson({
+          ok: Boolean(publicUrl),
+          mode,
+          path: tsPath,
+          localUrl,
+          publicUrl,
+          hint: publicUrl
+            ? undefined
+            : {
+                note: "Tailscale serve/funnel may be disabled on this tailnet (or require admin enable).",
+                enableUrl,
+              },
+        });
       },
     );
 }

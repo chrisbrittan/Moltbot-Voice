@@ -1,3 +1,7 @@
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "../shared/string-coerce.js";
 import type { CommandArgValues } from "./commands-registry.types.js";
 
 export type CommandArgsFormatter = (values: CommandArgValues) => string | undefined;
@@ -8,13 +12,13 @@ function normalizeArgValue(value: unknown): string | undefined {
   }
   let text: string;
   if (typeof value === "string") {
-    text = value.trim();
+    text = normalizeOptionalString(value) ?? "";
   } else if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    text = String(value).trim();
+    text = normalizeOptionalString(String(value)) ?? "";
   } else if (typeof value === "symbol") {
-    text = value.toString().trim();
+    text = normalizeOptionalString(value.toString()) ?? "";
   } else if (typeof value === "function") {
-    text = value.toString().trim();
+    text = normalizeOptionalString(value.toString()) ?? "";
   } else {
     // Objects and arrays
     text = JSON.stringify(value);
@@ -22,33 +26,70 @@ function normalizeArgValue(value: unknown): string | undefined {
   return text ? text : undefined;
 }
 
-const formatConfigArgs: CommandArgsFormatter = (values) => {
-  const action = normalizeArgValue(values.action)?.toLowerCase();
+function formatActionArgs(
+  values: CommandArgValues,
+  params: {
+    formatKnownAction: (action: string, path: string | undefined) => string | undefined;
+  },
+): string | undefined {
+  const action = normalizeOptionalLowercaseString(normalizeArgValue(values.action));
   const path = normalizeArgValue(values.path);
   const value = normalizeArgValue(values.value);
   if (!action) {
     return undefined;
   }
-  const rest = formatSetUnsetArgAction(action, { path, value });
-  if (action === "show" || action === "get") {
-    return path ? `${action} ${path}` : action;
+  const knownAction = params.formatKnownAction(action, path);
+  if (knownAction) {
+    return knownAction;
   }
-  return rest;
-};
+  return formatSetUnsetArgAction(action, { path, value });
+}
 
-const formatDebugArgs: CommandArgsFormatter = (values) => {
-  const action = normalizeArgValue(values.action)?.toLowerCase();
-  const path = normalizeArgValue(values.path);
-  const value = normalizeArgValue(values.value);
-  if (!action) {
-    return undefined;
-  }
-  const rest = formatSetUnsetArgAction(action, { path, value });
-  if (action === "show" || action === "reset") {
-    return action;
-  }
-  return rest;
-};
+const formatConfigArgs: CommandArgsFormatter = (values) =>
+  formatActionArgs(values, {
+    formatKnownAction: (action, path) => {
+      if (action === "show" || action === "get") {
+        return path ? `${action} ${path}` : action;
+      }
+      return undefined;
+    },
+  });
+
+const formatMcpArgs: CommandArgsFormatter = (values) =>
+  formatActionArgs(values, {
+    formatKnownAction: (action, path) => {
+      if (action === "show" || action === "get") {
+        return path ? `${action} ${path}` : action;
+      }
+      return undefined;
+    },
+  });
+
+const formatPluginsArgs: CommandArgsFormatter = (values) =>
+  formatActionArgs(values, {
+    formatKnownAction: (action, path) => {
+      if (action === "list") {
+        return "list";
+      }
+      if (action === "show" || action === "get") {
+        return path ? `${action} ${path}` : action;
+      }
+      if (action === "enable" || action === "disable") {
+        return path ? `${action} ${path}` : action;
+      }
+      return undefined;
+    },
+  });
+
+const formatDebugArgs: CommandArgsFormatter = (values) =>
+  formatActionArgs(values, {
+    formatKnownAction: (action) => {
+      if (action === "show" || action === "reset") {
+        return action;
+      }
+      return undefined;
+    },
+  });
 
 function formatSetUnsetArgAction(
   action: string,
@@ -113,6 +154,8 @@ const formatExecArgs: CommandArgsFormatter = (values) => {
 
 export const COMMAND_ARG_FORMATTERS: Record<string, CommandArgsFormatter> = {
   config: formatConfigArgs,
+  mcp: formatMcpArgs,
+  plugins: formatPluginsArgs,
   debug: formatDebugArgs,
   queue: formatQueueArgs,
   exec: formatExecArgs,

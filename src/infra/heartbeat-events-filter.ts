@@ -1,14 +1,34 @@
 import { HEARTBEAT_TOKEN } from "../auto-reply/tokens.js";
+import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 
 // Build a dynamic prompt for cron events by embedding the actual event content.
 // This ensures the model sees the reminder text directly instead of relying on
 // "shown in the system messages above" which may not be visible in context.
-export function buildCronEventPrompt(pendingEvents: string[]): string {
+export function buildCronEventPrompt(
+  pendingEvents: string[],
+  opts?: {
+    deliverToUser?: boolean;
+  },
+): string {
+  const deliverToUser = opts?.deliverToUser ?? true;
   const eventText = pendingEvents.join("\n").trim();
   if (!eventText) {
+    if (!deliverToUser) {
+      return (
+        "A scheduled cron event was triggered, but no event content was found. " +
+        "Handle this internally and reply HEARTBEAT_OK when nothing needs user-facing follow-up."
+      );
+    }
     return (
       "A scheduled cron event was triggered, but no event content was found. " +
       "Reply HEARTBEAT_OK."
+    );
+  }
+  if (!deliverToUser) {
+    return (
+      "A scheduled reminder has been triggered. The reminder content is:\n\n" +
+      eventText +
+      "\n\nHandle this reminder internally. Do not relay it to the user unless explicitly requested."
     );
   }
   return (
@@ -18,7 +38,22 @@ export function buildCronEventPrompt(pendingEvents: string[]): string {
   );
 }
 
-const HEARTBEAT_OK_PREFIX = HEARTBEAT_TOKEN.toLowerCase();
+export function buildExecEventPrompt(opts?: { deliverToUser?: boolean }): string {
+  const deliverToUser = opts?.deliverToUser ?? true;
+  if (!deliverToUser) {
+    return (
+      "An async command you ran earlier has completed. The result is shown in the system messages above. " +
+      "Handle the result internally. Do not relay it to the user unless explicitly requested."
+    );
+  }
+  return (
+    "An async command you ran earlier has completed. The result is shown in the system messages above. " +
+    "Please relay the command output to the user in a helpful way. If the command succeeded, share the relevant output. " +
+    "If it failed, explain what went wrong."
+  );
+}
+
+const HEARTBEAT_OK_PREFIX = normalizeLowercaseStringOrEmpty(HEARTBEAT_TOKEN);
 
 // Detect heartbeat-specific noise so cron reminders don't trigger on non-reminder events.
 function isHeartbeatAckEvent(evt: string): boolean {
@@ -26,7 +61,7 @@ function isHeartbeatAckEvent(evt: string): boolean {
   if (!trimmed) {
     return false;
   }
-  const lower = trimmed.toLowerCase();
+  const lower = normalizeLowercaseStringOrEmpty(trimmed);
   if (!lower.startsWith(HEARTBEAT_OK_PREFIX)) {
     return false;
   }
@@ -38,7 +73,7 @@ function isHeartbeatAckEvent(evt: string): boolean {
 }
 
 function isHeartbeatNoiseEvent(evt: string): boolean {
-  const lower = evt.trim().toLowerCase();
+  const lower = normalizeLowercaseStringOrEmpty(evt);
   if (!lower) {
     return false;
   }
@@ -50,7 +85,13 @@ function isHeartbeatNoiseEvent(evt: string): boolean {
 }
 
 export function isExecCompletionEvent(evt: string): boolean {
-  return evt.toLowerCase().includes("exec finished");
+  const normalized = normalizeLowercaseStringOrEmpty(evt).trimStart();
+  return (
+    /^exec finished(?::|\s*\()/.test(normalized) ||
+    /^exec (completed|failed) \([a-z0-9_-]{1,64}, (code -?\d+|signal [^)]+)\)( :: .*)?$/.test(
+      normalized,
+    )
+  );
 }
 
 // Returns true when a system event should be treated as real cron reminder content.

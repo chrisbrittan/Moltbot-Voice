@@ -1,15 +1,23 @@
 import path from "node:path";
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import type { MsgContext } from "../auto-reply/templating.js";
-import type { OpenClawConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
+import { renderFileContextBlock } from "../media/file-context.js";
 import {
   extractFileContentFromSource,
   normalizeMimeType,
   resolveInputFileLimits,
 } from "../media/input-files.js";
+import { wrapExternalContent } from "../security/external-content.js";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalLowercaseString,
+} from "../shared/string-coerce.js";
+import type { ActiveMediaModel } from "./active-model.types.js";
 import { resolveAttachmentKind } from "./attachments.js";
 import { runWithConcurrency } from "./concurrency.js";
+import { DEFAULT_ECHO_TRANSCRIPT_FORMAT, sendTranscriptEcho } from "./echo-transcript.js";
 import {
   extractMediaUserText,
   formatAudioTranscripts,
@@ -17,10 +25,10 @@ import {
 } from "./format.js";
 import { resolveConcurrency } from "./resolve.js";
 import {
-  type ActiveMediaModel,
   buildProviderRegistry,
   createMediaAttachmentCache,
   normalizeMediaAttachments,
+  resolveMediaAttachmentLocalRoots,
   runCapability,
 } from "./runner.js";
 import type {
@@ -66,30 +74,8 @@ const TEXT_EXT_MIME = new Map<string, string>([
   [".xml", "application/xml"],
 ]);
 
-const XML_ESCAPE_MAP: Record<string, string> = {
-  "<": "&lt;",
-  ">": "&gt;",
-  "&": "&amp;",
-  '"': "&quot;",
-  "'": "&apos;",
-};
-
-/**
- * Escapes special XML characters in attribute values to prevent injection.
- */
-function xmlEscapeAttr(value: string): string {
-  return value.replace(/[<>&"']/g, (char) => XML_ESCAPE_MAP[char] ?? char);
-}
-
-function escapeFileBlockContent(value: string): string {
-  return value.replace(/<\s*\/\s*file\s*>/gi, "&lt;/file&gt;").replace(/<\s*file\b/gi, "&lt;file");
-}
-
 function sanitizeMimeType(value?: string): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const trimmed = value.trim().toLowerCase();
+  const trimmed = normalizeOptionalLowercaseString(value);
   if (!trimmed) {
     return undefined;
   }
@@ -116,6 +102,13 @@ function appendFileBlocks(body: string | undefined, blocks: string[]): string {
     return suffix;
   }
   return `${base}\n\n${suffix}`.trim();
+}
+
+function wrapUntrustedAttachmentContent(content: string): string {
+  return wrapExternalContent(content, {
+    source: "unknown",
+    includeWarning: false,
+  });
 }
 
 function resolveUtf16Charset(buffer?: Buffer): "utf-16le" | "utf-16be" | undefined {
@@ -295,7 +288,7 @@ function resolveTextMimeFromName(name?: string): string | undefined {
   if (!name) {
     return undefined;
   }
-  const ext = path.extname(name).toLowerCase();
+  const ext = normalizeLowercaseStringOrEmpty(path.extname(name));
   return TEXT_EXT_MIME.get(ext);
 }
 
@@ -381,7 +374,11 @@ async function extractFileBlocks(params: {
     }
     const utf16Charset = resolveUtf16Charset(bufferResult?.buffer);
     const textSample = decodeTextSample(bufferResult?.buffer);
-    const textLike = Boolean(utf16Charset) || looksLikeUtf8Text(bufferResult?.buffer);
+    // Do not coerce real PDFs into text/plain via printable-byte heuristics.
+    // PDFs have a dedicated extraction path in extractFileContentFromSource.
+    const allowTextHeuristic = normalizedRawMime !== "application/pdf";
+    const textLike =
+      allowTextHeuristic && (Boolean(utf16Charset) || looksLikeUtf8Text(bufferResult?.buffer));
     const guessedDelimited = textLike ? guessDelimitedMime(textSample) : undefined;
     const textHint =
       forcedTextMimeResolved ?? guessedDelimited ?? (textLike ? "text/plain" : undefined);
@@ -438,7 +435,7 @@ async function extractFileBlocks(params: {
       continue;
     }
     const text = extracted?.text?.trim() ?? "";
-    let blockText = text;
+    let blockText = text ? wrapUntrustedAttachmentContent(text) : "";
     if (!blockText) {
       if (extracted?.images && extracted.images.length > 0) {
         blockText = "[PDF content rendered to images; images not forwarded to model]";
@@ -446,12 +443,13 @@ async function extractFileBlocks(params: {
         blockText = "[No extractable text]";
       }
     }
-    const safeName = (bufferResult.fileName ?? `file-${attachment.index + 1}`)
-      .replace(/[\r\n\t]+/g, " ")
-      .trim();
-    // Escape XML special characters in attributes to prevent injection
     blocks.push(
-      `<file name="${xmlEscapeAttr(safeName)}" mime="${xmlEscapeAttr(mimeType)}">\n${escapeFileBlockContent(blockText)}\n</file>`,
+      renderFileContextBlock({
+        filename: bufferResult.fileName,
+        fallbackName: `file-${attachment.index + 1}`,
+        mimeType,
+        content: blockText,
+      }),
     );
   }
   return blocks;
@@ -472,8 +470,10 @@ export async function applyMediaUnderstanding(params: {
       .find((value) => value && value.trim()) ?? undefined;
 
   const attachments = normalizeMediaAttachments(ctx);
-  const providerRegistry = buildProviderRegistry(params.providers);
-  const cache = createMediaAttachmentCache(attachments);
+  const providerRegistry = buildProviderRegistry(params.providers, cfg);
+  const cache = createMediaAttachmentCache(attachments, {
+    localPathRoots: resolveMediaAttachmentLocalRoots({ cfg, ctx }),
+  });
 
   try {
     const tasks = CAPABILITY_ORDER.map((capability) => async () => {
@@ -520,6 +520,16 @@ export async function applyMediaUnderstanding(params: {
         } else {
           ctx.CommandBody = transcript;
           ctx.RawBody = transcript;
+        }
+        // Echo transcript back to chat before agent processing, if configured.
+        const audioCfg = cfg.tools?.media?.audio;
+        if (audioCfg?.echoTranscript && transcript) {
+          await sendTranscriptEcho({
+            ctx,
+            cfg,
+            transcript,
+            format: audioCfg.echoFormat ?? DEFAULT_ECHO_TRANSCRIPT_FORMAT,
+          });
         }
       } else if (originalUserText) {
         ctx.CommandBody = originalUserText;

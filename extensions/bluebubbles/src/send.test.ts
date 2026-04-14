@@ -1,15 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "./test-mocks.js";
-import { getCachedBlueBubblesPrivateApiStatus } from "./probe.js";
-import { sendMessageBlueBubbles, resolveChatGuidForTarget } from "./send.js";
-import { installBlueBubblesFetchTestHooks } from "./test-harness.js";
-import type { BlueBubblesSendTarget } from "./types.js";
+import { fetchBlueBubblesServerInfo, getCachedBlueBubblesPrivateApiStatus } from "./probe.js";
+import type { PluginRuntime } from "./runtime-api.js";
+import { clearBlueBubblesRuntime, setBlueBubblesRuntime } from "./runtime.js";
+import { sendMessageBlueBubbles, resolveChatGuidForTarget, createChatForHandle } from "./send.js";
+import {
+  BLUE_BUBBLES_PRIVATE_API_STATUS,
+  createBlueBubblesFetchGuardPassthroughInstaller,
+  installBlueBubblesFetchTestHooks,
+  mockBlueBubblesPrivateApiStatusOnce,
+} from "./test-harness.js";
+import { _setFetchGuardForTesting, type BlueBubblesSendTarget } from "./types.js";
 
 const mockFetch = vi.fn();
+const privateApiStatusMock = vi.mocked(getCachedBlueBubblesPrivateApiStatus);
+const fetchServerInfoMock = vi.mocked(fetchBlueBubblesServerInfo);
+const setFetchGuardPassthrough = createBlueBubblesFetchGuardPassthroughInstaller();
 
 installBlueBubblesFetchTestHooks({
   mockFetch,
-  privateApiStatusMock: vi.mocked(getCachedBlueBubblesPrivateApiStatus),
+  privateApiStatusMock,
 });
 
 function mockResolvedHandleTarget(
@@ -34,6 +44,29 @@ function mockSendResponse(body: unknown) {
   mockFetch.mockResolvedValueOnce({
     ok: true,
     text: () => Promise.resolve(JSON.stringify(body)),
+  });
+}
+
+function mockNewChatSendResponse(guid: string) {
+  mockFetch
+    .mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            data: { guid },
+          }),
+        ),
+    });
+}
+
+function installSsrFPolicyCapture(policies: unknown[]) {
+  setFetchGuardPassthrough((policy) => {
+    policies.push(policy);
   });
 }
 
@@ -346,6 +379,8 @@ describe("send", () => {
   describe("sendMessageBlueBubbles", () => {
     beforeEach(() => {
       mockFetch.mockReset();
+      fetchServerInfoMock.mockReset();
+      fetchServerInfoMock.mockResolvedValue(null);
     });
 
     it("throws when text is empty", async () => {
@@ -424,6 +459,44 @@ describe("send", () => {
       expect(body.method).toBeUndefined();
     });
 
+    it("auto-enables private-network fetches for loopback serverUrl when allowPrivateNetwork is not set", async () => {
+      const policies: unknown[] = [];
+      installSsrFPolicyCapture(policies);
+      mockResolvedHandleTarget();
+      mockSendResponse({ data: { guid: "msg-loopback" } });
+
+      try {
+        const result = await sendMessageBlueBubbles("+15551234567", "Hello world!", {
+          serverUrl: "http://localhost:1234",
+          password: "test",
+        });
+
+        expect(result.messageId).toBe("msg-loopback");
+        expect(policies).toEqual([{ allowPrivateNetwork: true }, { allowPrivateNetwork: true }]);
+      } finally {
+        _setFetchGuardForTesting(null);
+      }
+    });
+
+    it("auto-enables private-network fetches for private IP serverUrl when allowPrivateNetwork is not set", async () => {
+      const policies: unknown[] = [];
+      installSsrFPolicyCapture(policies);
+      mockResolvedHandleTarget();
+      mockSendResponse({ data: { guid: "msg-private-ip" } });
+
+      try {
+        const result = await sendMessageBlueBubbles("+15551234567", "Hello world!", {
+          serverUrl: "http://192.168.1.5:1234",
+          password: "test",
+        });
+
+        expect(result.messageId).toBe("msg-private-ip");
+        expect(policies).toEqual([{ allowPrivateNetwork: true }, { allowPrivateNetwork: true }]);
+      } finally {
+        _setFetchGuardForTesting(null);
+      }
+    });
+
     it("strips markdown formatting from outbound messages", async () => {
       mockResolvedHandleTarget();
       mockSendResponse({ data: { guid: "msg-uuid-stripped" } });
@@ -446,20 +519,7 @@ describe("send", () => {
     });
 
     it("strips markdown when creating a new chat", async () => {
-      mockFetch
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          text: () =>
-            Promise.resolve(
-              JSON.stringify({
-                data: { guid: "new-msg-stripped" },
-              }),
-            ),
-        });
+      mockNewChatSendResponse("new-msg-stripped");
 
       const result = await sendMessageBlueBubbles("+15550009999", "**Welcome** to the _chat_!", {
         serverUrl: "http://localhost:1234",
@@ -476,20 +536,7 @@ describe("send", () => {
     });
 
     it("creates a new chat when handle target is missing", async () => {
-      mockFetch
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          text: () =>
-            Promise.resolve(
-              JSON.stringify({
-                data: { guid: "new-msg-guid" },
-              }),
-            ),
-        });
+      mockNewChatSendResponse("new-msg-guid");
 
       const result = await sendMessageBlueBubbles("+15550009999", "Hello new chat", {
         serverUrl: "http://localhost:1234",
@@ -527,6 +574,10 @@ describe("send", () => {
     });
 
     it("uses private-api when reply metadata is present", async () => {
+      mockBlueBubblesPrivateApiStatusOnce(
+        privateApiStatusMock,
+        BLUE_BUBBLES_PRIVATE_API_STATUS.enabled,
+      );
       mockResolvedHandleTarget();
       mockSendResponse({ data: { guid: "msg-uuid-124" } });
 
@@ -548,7 +599,10 @@ describe("send", () => {
     });
 
     it("downgrades threaded reply to plain send when private API is disabled", async () => {
-      vi.mocked(getCachedBlueBubblesPrivateApiStatus).mockReturnValueOnce(false);
+      mockBlueBubblesPrivateApiStatusOnce(
+        privateApiStatusMock,
+        BLUE_BUBBLES_PRIVATE_API_STATUS.disabled,
+      );
       mockResolvedHandleTarget();
       mockSendResponse({ data: { guid: "msg-uuid-plain" } });
 
@@ -568,6 +622,10 @@ describe("send", () => {
     });
 
     it("normalizes effect names and uses private-api for effects", async () => {
+      mockBlueBubblesPrivateApiStatusOnce(
+        privateApiStatusMock,
+        BLUE_BUBBLES_PRIVATE_API_STATUS.enabled,
+      );
       mockResolvedHandleTarget();
       mockSendResponse({ data: { guid: "msg-uuid-125" } });
 
@@ -584,6 +642,38 @@ describe("send", () => {
       const body = JSON.parse(sendCall[1].body);
       expect(body.method).toBe("private-api");
       expect(body.effectId).toBe("com.apple.MobileSMS.expressivesend.invisibleink");
+    });
+
+    it("warns and downgrades private-api features when status is unknown", async () => {
+      const runtimeLog = vi.fn();
+      setBlueBubblesRuntime({ log: runtimeLog } as unknown as PluginRuntime);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockResolvedHandleTarget();
+      mockSendResponse({ data: { guid: "msg-uuid-unknown" } });
+
+      try {
+        const result = await sendMessageBlueBubbles("+15551234567", "Reply fallback", {
+          serverUrl: "http://localhost:1234",
+          password: "test",
+          replyToMessageGuid: "reply-guid-123",
+          effectId: "invisible ink",
+        });
+
+        expect(result.messageId).toBe("msg-uuid-unknown");
+        expect(runtimeLog).toHaveBeenCalledTimes(1);
+        expect(runtimeLog.mock.calls[0]?.[0]).toContain("Private API status unknown");
+        expect(warnSpy).not.toHaveBeenCalled();
+
+        const sendCall = mockFetch.mock.calls[1];
+        const body = JSON.parse(sendCall[1].body);
+        expect(body.method).toBeUndefined();
+        expect(body.selectedMessageGuid).toBeUndefined();
+        expect(body.partIndex).toBeUndefined();
+        expect(body.effectId).toBeUndefined();
+      } finally {
+        clearBlueBubblesRuntime();
+        warnSpy.mockRestore();
+      }
     });
 
     it("sends message with chat_guid target directly", async () => {
@@ -680,6 +770,30 @@ describe("send", () => {
       expect(result.messageId).toBe("msg-guid-789");
     });
 
+    it("extracts top-level message_id from response payload", async () => {
+      mockResolvedHandleTarget();
+      mockSendResponse({ message_id: "bb-msg-321" });
+
+      const result = await sendMessageBlueBubbles("+15551234567", "Hello", {
+        serverUrl: "http://localhost:1234",
+        password: "test",
+      });
+
+      expect(result.messageId).toBe("bb-msg-321");
+    });
+
+    it("extracts nested result.message_id from response payload", async () => {
+      mockResolvedHandleTarget();
+      mockSendResponse({ result: { message_id: "bb-msg-654" } });
+
+      const result = await sendMessageBlueBubbles("+15551234567", "Hello", {
+        serverUrl: "http://localhost:1234",
+        password: "test",
+      });
+
+      expect(result.messageId).toBe("bb-msg-654");
+    });
+
     it("resolves credentials from config", async () => {
       mockResolvedHandleTarget();
       mockSendResponse({ data: { guid: "msg-123" } });
@@ -714,6 +828,305 @@ describe("send", () => {
       expect(body.tempGuid).toBeDefined();
       expect(typeof body.tempGuid).toBe("string");
       expect(body.tempGuid.length).toBeGreaterThan(0);
+    });
+
+    describe("lazy private API refresh (#43764)", () => {
+      it("does not refresh when cache is populated (cache hit)", async () => {
+        mockBlueBubblesPrivateApiStatusOnce(
+          privateApiStatusMock,
+          BLUE_BUBBLES_PRIVATE_API_STATUS.enabled,
+        );
+        mockResolvedHandleTarget();
+        mockSendResponse({ data: { guid: "msg-cached" } });
+
+        const result = await sendMessageBlueBubbles("+15551234567", "Replying", {
+          serverUrl: "http://localhost:1234",
+          password: "test",
+          replyToMessageGuid: "reply-guid-123",
+        });
+
+        expect(result.messageId).toBe("msg-cached");
+        expect(fetchServerInfoMock).not.toHaveBeenCalled();
+        const sendCall = mockFetch.mock.calls[1];
+        const body = JSON.parse(sendCall[1].body);
+        expect(body.method).toBe("private-api");
+        expect(body.selectedMessageGuid).toBe("reply-guid-123");
+      });
+
+      it("refreshes cache when expired and reply threading is requested", async () => {
+        // First call returns null (cache expired), after refresh returns enabled
+        privateApiStatusMock.mockReturnValueOnce(null).mockReturnValueOnce(true);
+        fetchServerInfoMock.mockResolvedValueOnce({ private_api: true });
+        mockResolvedHandleTarget();
+        mockSendResponse({ data: { guid: "msg-refreshed" } });
+
+        const result = await sendMessageBlueBubbles("+15551234567", "Replying", {
+          serverUrl: "http://localhost:1234",
+          password: "test",
+          replyToMessageGuid: "reply-guid-456",
+        });
+
+        expect(result.messageId).toBe("msg-refreshed");
+        expect(fetchServerInfoMock).toHaveBeenCalledTimes(1);
+        expect(fetchServerInfoMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            baseUrl: expect.stringContaining("localhost"),
+            password: "test",
+            accountId: expect.any(String),
+            allowPrivateNetwork: expect.any(Boolean),
+          }),
+        );
+        const sendCall = mockFetch.mock.calls[1];
+        const body = JSON.parse(sendCall[1].body);
+        expect(body.method).toBe("private-api");
+        expect(body.selectedMessageGuid).toBe("reply-guid-456");
+      });
+
+      it("refreshes cache when expired and effect is requested", async () => {
+        privateApiStatusMock.mockReturnValueOnce(null).mockReturnValueOnce(true);
+        fetchServerInfoMock.mockResolvedValueOnce({ private_api: true });
+        mockResolvedHandleTarget();
+        mockSendResponse({ data: { guid: "msg-effect-refreshed" } });
+
+        const result = await sendMessageBlueBubbles("+15551234567", "Party!", {
+          serverUrl: "http://localhost:1234",
+          password: "test",
+          effectId: "confetti",
+        });
+
+        expect(result.messageId).toBe("msg-effect-refreshed");
+        expect(fetchServerInfoMock).toHaveBeenCalledTimes(1);
+        const sendCall = mockFetch.mock.calls[1];
+        const body = JSON.parse(sendCall[1].body);
+        expect(body.method).toBe("private-api");
+        expect(body.effectId).toBe("com.apple.messages.effect.CKConfettiEffect");
+      });
+
+      it("degrades gracefully when refresh fails", async () => {
+        // Cache expired, refresh throws — should fall back to existing behavior
+        fetchServerInfoMock.mockRejectedValueOnce(new Error("network error"));
+        mockResolvedHandleTarget();
+        mockSendResponse({ data: { guid: "msg-degraded" } });
+
+        const runtimeLog = vi.fn();
+        setBlueBubblesRuntime({ log: runtimeLog } as unknown as PluginRuntime);
+
+        try {
+          const result = await sendMessageBlueBubbles("+15551234567", "Reply fallback", {
+            serverUrl: "http://localhost:1234",
+            password: "test",
+            replyToMessageGuid: "reply-guid-789",
+          });
+
+          expect(result.messageId).toBe("msg-degraded");
+          expect(fetchServerInfoMock).toHaveBeenCalledTimes(1);
+          // Should warn about unknown status and send without threading
+          expect(runtimeLog).toHaveBeenCalledTimes(1);
+          expect(runtimeLog.mock.calls[0]?.[0]).toContain("Private API status unknown");
+          const sendCall = mockFetch.mock.calls[1];
+          const body = JSON.parse(sendCall[1].body);
+          expect(body.method).toBeUndefined();
+          expect(body.selectedMessageGuid).toBeUndefined();
+        } finally {
+          clearBlueBubblesRuntime();
+        }
+      });
+
+      it("throws for effects when refresh succeeds with private_api: false", async () => {
+        // Cache expired, refresh succeeds but Private API is explicitly disabled
+        privateApiStatusMock.mockReturnValueOnce(null).mockReturnValueOnce(false);
+        fetchServerInfoMock.mockResolvedValueOnce({ private_api: false });
+        mockResolvedHandleTarget();
+
+        await expect(
+          sendMessageBlueBubbles("+15551234567", "Party!", {
+            serverUrl: "http://localhost:1234",
+            password: "test",
+            effectId: "confetti",
+          }),
+        ).rejects.toThrow("Private API");
+
+        expect(fetchServerInfoMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("degrades reply threading when refresh succeeds with private_api: false", async () => {
+        // Cache expired, refresh succeeds but Private API is explicitly disabled
+        // Should degrade without the "unknown" warning (status is known: disabled)
+        privateApiStatusMock.mockReturnValueOnce(null).mockReturnValueOnce(false);
+        fetchServerInfoMock.mockResolvedValueOnce({ private_api: false });
+        mockResolvedHandleTarget();
+        mockSendResponse({ data: { guid: "msg-disabled-after-refresh" } });
+
+        const runtimeLog = vi.fn();
+        setBlueBubblesRuntime({ log: runtimeLog } as unknown as PluginRuntime);
+
+        try {
+          const result = await sendMessageBlueBubbles("+15551234567", "Reply fallback", {
+            serverUrl: "http://localhost:1234",
+            password: "test",
+            replyToMessageGuid: "reply-guid-disabled",
+          });
+
+          expect(result.messageId).toBe("msg-disabled-after-refresh");
+          expect(fetchServerInfoMock).toHaveBeenCalledTimes(1);
+          // No warning — status is known (disabled), not unknown
+          expect(runtimeLog).not.toHaveBeenCalled();
+          const sendCall = mockFetch.mock.calls[1];
+          const body = JSON.parse(sendCall[1].body);
+          expect(body.method).toBeUndefined();
+          expect(body.selectedMessageGuid).toBeUndefined();
+        } finally {
+          clearBlueBubblesRuntime();
+        }
+      });
+
+      it("does not refresh when no reply or effect is requested", async () => {
+        // Cache expired but no Private API features needed — skip refresh
+        mockResolvedHandleTarget();
+        mockSendResponse({ data: { guid: "msg-plain" } });
+
+        const result = await sendMessageBlueBubbles("+15551234567", "Plain message", {
+          serverUrl: "http://localhost:1234",
+          password: "test",
+        });
+
+        expect(result.messageId).toBe("msg-plain");
+        expect(fetchServerInfoMock).not.toHaveBeenCalled();
+        const sendCall = mockFetch.mock.calls[1];
+        const body = JSON.parse(sendCall[1].body);
+        expect(body.method).toBeUndefined();
+      });
+
+      it("degrades gracefully when refresh returns null (server unreachable)", async () => {
+        // Cache expired, refresh returns null (server info unavailable)
+        fetchServerInfoMock.mockResolvedValueOnce(null);
+        mockResolvedHandleTarget();
+        mockSendResponse({ data: { guid: "msg-null-refresh" } });
+
+        const runtimeLog = vi.fn();
+        setBlueBubblesRuntime({ log: runtimeLog } as unknown as PluginRuntime);
+
+        try {
+          const result = await sendMessageBlueBubbles("+15551234567", "Reply attempt", {
+            serverUrl: "http://localhost:1234",
+            password: "test",
+            replyToMessageGuid: "reply-guid-000",
+          });
+
+          expect(result.messageId).toBe("msg-null-refresh");
+          expect(fetchServerInfoMock).toHaveBeenCalledTimes(1);
+          // privateApiStatus still null after failed refresh → warning + degradation
+          expect(runtimeLog).toHaveBeenCalledTimes(1);
+          expect(runtimeLog.mock.calls[0]?.[0]).toContain("Private API status unknown");
+        } finally {
+          clearBlueBubblesRuntime();
+        }
+      });
+    });
+  });
+
+  describe("createChatForHandle", () => {
+    it("creates a new chat and returns chatGuid from response", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              data: { guid: "iMessage;-;+15559876543", chatGuid: "iMessage;-;+15559876543" },
+            }),
+          ),
+      });
+
+      const result = await createChatForHandle({
+        baseUrl: "http://localhost:1234",
+        password: "test",
+        address: "+15559876543",
+        message: "Hello!",
+      });
+
+      expect(result.chatGuid).toBe("iMessage;-;+15559876543");
+      expect(result.messageId).toBeDefined();
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.addresses).toEqual(["+15559876543"]);
+      expect(body.message).toBe("Hello!");
+    });
+
+    it("creates a new chat without a message when message is omitted", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              data: { guid: "iMessage;-;+15559876543" },
+            }),
+          ),
+      });
+
+      const result = await createChatForHandle({
+        baseUrl: "http://localhost:1234",
+        password: "test",
+        address: "+15559876543",
+      });
+
+      expect(result.chatGuid).toBe("iMessage;-;+15559876543");
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.message).toBe("");
+    });
+
+    it.each([
+      ["data.chatGuid", { data: { chatGuid: "shape-chat-guid" } }, "shape-chat-guid"],
+      ["data.guid", { data: { guid: "shape-guid" } }, "shape-guid"],
+      [
+        "data.chats[0].guid",
+        { data: { chats: [{ guid: "shape-array-guid" }] } },
+        "shape-array-guid",
+      ],
+      ["data.chat.guid", { data: { chat: { guid: "shape-object-guid" } } }, "shape-object-guid"],
+    ])("extracts chatGuid from %s", async (_label, responseBody, expectedChatGuid) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify(responseBody)),
+      });
+
+      const result = await createChatForHandle({
+        baseUrl: "http://localhost:1234",
+        password: "test",
+        address: "+15559876543",
+      });
+
+      expect(result.chatGuid).toBe(expectedChatGuid);
+    });
+
+    it("throws when Private API is not enabled", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        text: () => Promise.resolve("Private API not enabled"),
+      });
+
+      await expect(
+        createChatForHandle({
+          baseUrl: "http://localhost:1234",
+          password: "test",
+          address: "+15559876543",
+        }),
+      ).rejects.toThrow("Private API must be enabled");
+    });
+
+    it("returns null chatGuid when response has no chat data", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({ data: {} })),
+      });
+
+      const result = await createChatForHandle({
+        baseUrl: "http://localhost:1234",
+        password: "test",
+        address: "+15559876543",
+        message: "Hello",
+      });
+
+      expect(result.chatGuid).toBeNull();
     });
   });
 });

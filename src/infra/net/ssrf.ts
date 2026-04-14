@@ -1,13 +1,31 @@
 import { lookup as dnsLookupCb, type LookupAddress } from "node:dns";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { Agent, type Dispatcher } from "undici";
+import type { Dispatcher } from "undici";
+import {
+  extractEmbeddedIpv4FromIpv6,
+  isBlockedSpecialUseIpv4Address,
+  isBlockedSpecialUseIpv6Address,
+  isCanonicalDottedDecimalIPv4,
+  type Ipv4SpecialUseBlockOptions,
+  isIpv4Address,
+  isLegacyIpv4Literal,
+  parseCanonicalIpAddress,
+  parseLooseIpAddress,
+} from "../../shared/net/ip.js";
 import { normalizeHostname } from "./hostname.js";
+import {
+  createHttp1Agent,
+  createHttp1EnvHttpProxyAgent,
+  createHttp1ProxyAgent,
+} from "./undici-runtime.js";
 
 type LookupCallback = (
   err: NodeJS.ErrnoException | null,
   address: string | LookupAddress[],
   family?: number,
 ) => void;
+
+type LookupResult = LookupAddress | LookupAddress[];
 
 export class SsrFBlockedError extends Error {
   constructor(message: string) {
@@ -20,11 +38,17 @@ export type LookupFn = typeof dnsLookup;
 
 export type SsrFPolicy = {
   allowPrivateNetwork?: boolean;
+  dangerouslyAllowPrivateNetwork?: boolean;
+  allowRfc2544BenchmarkRange?: boolean;
   allowedHostnames?: string[];
   hostnameAllowlist?: string[];
 };
 
-const BLOCKED_HOSTNAMES = new Set(["localhost", "metadata.google.internal"]);
+const BLOCKED_HOSTNAMES = new Set([
+  "localhost",
+  "localhost.localdomain",
+  "metadata.google.internal",
+]);
 
 function normalizeHostnameSet(values?: string[]): Set<string> {
   if (!values || values.length === 0) {
@@ -33,7 +57,7 @@ function normalizeHostnameSet(values?: string[]): Set<string> {
   return new Set(values.map((value) => normalizeHostname(value)).filter(Boolean));
 }
 
-function normalizeHostnameAllowlist(values?: string[]): string[] {
+export function normalizeHostnameAllowlist(values?: string[]): string[] {
   if (!values || values.length === 0) {
     return [];
   }
@@ -46,7 +70,24 @@ function normalizeHostnameAllowlist(values?: string[]): string[] {
   );
 }
 
-function isHostnameAllowedByPattern(hostname: string, pattern: string): boolean {
+export function isPrivateNetworkAllowedByPolicy(policy?: SsrFPolicy): boolean {
+  return policy?.dangerouslyAllowPrivateNetwork === true || policy?.allowPrivateNetwork === true;
+}
+
+function shouldSkipPrivateNetworkChecks(hostname: string, policy?: SsrFPolicy): boolean {
+  return (
+    isPrivateNetworkAllowedByPolicy(policy) ||
+    normalizeHostnameSet(policy?.allowedHostnames).has(hostname)
+  );
+}
+
+function resolveIpv4SpecialUseBlockOptions(policy?: SsrFPolicy): Ipv4SpecialUseBlockOptions {
+  return {
+    allowRfc2544BenchmarkRange: policy?.allowRfc2544BenchmarkRange === true,
+  };
+}
+
+export function isHostnameAllowedByPattern(hostname: string, pattern: string): boolean {
   if (pattern.startsWith("*.")) {
     const suffix = pattern.slice(2);
     if (!suffix || hostname === suffix) {
@@ -57,248 +98,61 @@ function isHostnameAllowedByPattern(hostname: string, pattern: string): boolean 
   return hostname === pattern;
 }
 
-function matchesHostnameAllowlist(hostname: string, allowlist: string[]): boolean {
+export function matchesHostnameAllowlist(hostname: string, allowlist: string[]): boolean {
   if (allowlist.length === 0) {
     return true;
   }
   return allowlist.some((pattern) => isHostnameAllowedByPattern(hostname, pattern));
 }
 
-function parseIpv4(address: string): number[] | null {
+function looksLikeUnsupportedIpv4Literal(address: string): boolean {
   const parts = address.split(".");
-  if (parts.length !== 4) {
-    return null;
+  if (parts.length === 0 || parts.length > 4) {
+    return false;
   }
-  const numbers = parts.map((part) => Number.parseInt(part, 10));
-  if (numbers.some((value) => Number.isNaN(value) || value < 0 || value > 255)) {
-    return null;
+  if (parts.some((part) => part.length === 0)) {
+    return true;
   }
-  return numbers;
+  // Tighten only "ipv4-ish" literals (numbers + optional 0x prefix). Hostnames like
+  // "example.com" must stay in hostname policy handling and not be treated as malformed IPs.
+  return parts.every((part) => /^[0-9]+$/.test(part) || /^0x/i.test(part));
 }
 
-function stripIpv6ZoneId(address: string): string {
-  const index = address.indexOf("%");
-  return index >= 0 ? address.slice(0, index) : address;
-}
-
-function parseIpv6Hextets(address: string): number[] | null {
-  let input = stripIpv6ZoneId(address.trim().toLowerCase());
-  if (!input) {
-    return null;
-  }
-
-  // Handle IPv4-embedded IPv6 like ::ffff:127.0.0.1 by converting the tail to 2 hextets.
-  if (input.includes(".")) {
-    const lastColon = input.lastIndexOf(":");
-    if (lastColon < 0) {
-      return null;
-    }
-    const ipv4 = parseIpv4(input.slice(lastColon + 1));
-    if (!ipv4) {
-      return null;
-    }
-    const high = (ipv4[0] << 8) + ipv4[1];
-    const low = (ipv4[2] << 8) + ipv4[3];
-    input = `${input.slice(0, lastColon)}:${high.toString(16)}:${low.toString(16)}`;
-  }
-
-  const doubleColonParts = input.split("::");
-  if (doubleColonParts.length > 2) {
-    return null;
-  }
-
-  const headParts =
-    doubleColonParts[0]?.length > 0 ? doubleColonParts[0].split(":").filter(Boolean) : [];
-  const tailParts =
-    doubleColonParts.length === 2 && doubleColonParts[1]?.length > 0
-      ? doubleColonParts[1].split(":").filter(Boolean)
-      : [];
-
-  const missingParts = 8 - headParts.length - tailParts.length;
-  if (missingParts < 0) {
-    return null;
-  }
-
-  const fullParts =
-    doubleColonParts.length === 1
-      ? input.split(":")
-      : [...headParts, ...Array.from({ length: missingParts }, () => "0"), ...tailParts];
-
-  if (fullParts.length !== 8) {
-    return null;
-  }
-
-  const hextets: number[] = [];
-  for (const part of fullParts) {
-    if (!part) {
-      return null;
-    }
-    const value = Number.parseInt(part, 16);
-    if (Number.isNaN(value) || value < 0 || value > 0xffff) {
-      return null;
-    }
-    hextets.push(value);
-  }
-  return hextets;
-}
-
-function decodeIpv4FromHextets(high: number, low: number): number[] {
-  return [(high >>> 8) & 0xff, high & 0xff, (low >>> 8) & 0xff, low & 0xff];
-}
-
-type EmbeddedIpv4Rule = {
-  matches: (hextets: number[]) => boolean;
-  extract: (hextets: number[]) => [high: number, low: number];
-};
-
-const EMBEDDED_IPV4_RULES: EmbeddedIpv4Rule[] = [
-  {
-    // IPv4-mapped: ::ffff:a.b.c.d and IPv4-compatible ::a.b.c.d.
-    matches: (hextets) =>
-      hextets[0] === 0 &&
-      hextets[1] === 0 &&
-      hextets[2] === 0 &&
-      hextets[3] === 0 &&
-      hextets[4] === 0 &&
-      (hextets[5] === 0xffff || hextets[5] === 0),
-    extract: (hextets) => [hextets[6], hextets[7]],
-  },
-  {
-    // NAT64 well-known prefix: 64:ff9b::/96.
-    matches: (hextets) =>
-      hextets[0] === 0x0064 &&
-      hextets[1] === 0xff9b &&
-      hextets[2] === 0 &&
-      hextets[3] === 0 &&
-      hextets[4] === 0 &&
-      hextets[5] === 0,
-    extract: (hextets) => [hextets[6], hextets[7]],
-  },
-  {
-    // NAT64 local-use prefix: 64:ff9b:1::/48.
-    matches: (hextets) =>
-      hextets[0] === 0x0064 &&
-      hextets[1] === 0xff9b &&
-      hextets[2] === 0x0001 &&
-      hextets[3] === 0 &&
-      hextets[4] === 0 &&
-      hextets[5] === 0,
-    extract: (hextets) => [hextets[6], hextets[7]],
-  },
-  {
-    // 6to4 prefix: 2002::/16 where hextets[1..2] carry IPv4.
-    matches: (hextets) => hextets[0] === 0x2002,
-    extract: (hextets) => [hextets[1], hextets[2]],
-  },
-  {
-    // Teredo prefix: 2001:0000::/32 with client IPv4 obfuscated via XOR 0xffff.
-    matches: (hextets) => hextets[0] === 0x2001 && hextets[1] === 0x0000,
-    extract: (hextets) => [hextets[6] ^ 0xffff, hextets[7] ^ 0xffff],
-  },
-];
-
-function extractIpv4FromEmbeddedIpv6(hextets: number[]): number[] | null {
-  for (const rule of EMBEDDED_IPV4_RULES) {
-    if (!rule.matches(hextets)) {
-      continue;
-    }
-    const [high, low] = rule.extract(hextets);
-    return decodeIpv4FromHextets(high, low);
-  }
-  return null;
-}
-
-function isPrivateIpv4(parts: number[]): boolean {
-  const [octet1, octet2] = parts;
-  if (octet1 === 0) {
-    return true;
-  }
-  if (octet1 === 10) {
-    return true;
-  }
-  if (octet1 === 127) {
-    return true;
-  }
-  if (octet1 === 169 && octet2 === 254) {
-    return true;
-  }
-  if (octet1 === 172 && octet2 >= 16 && octet2 <= 31) {
-    return true;
-  }
-  if (octet1 === 192 && octet2 === 168) {
-    return true;
-  }
-  if (octet1 === 100 && octet2 >= 64 && octet2 <= 127) {
-    return true;
-  }
-  return false;
-}
-
-export function isPrivateIpAddress(address: string): boolean {
-  let normalized = address.trim().toLowerCase();
-  if (normalized.startsWith("[") && normalized.endsWith("]")) {
-    normalized = normalized.slice(1, -1);
-  }
+// Returns true for private/internal and special-use non-global addresses.
+export function isPrivateIpAddress(address: string, policy?: SsrFPolicy): boolean {
+  const normalized = normalizeHostname(address);
   if (!normalized) {
     return false;
   }
+  const blockOptions = resolveIpv4SpecialUseBlockOptions(policy);
 
-  if (normalized.includes(":")) {
-    const hextets = parseIpv6Hextets(normalized);
-    if (!hextets) {
-      // Security-critical parse failures should fail closed.
+  const strictIp = parseCanonicalIpAddress(normalized);
+  if (strictIp) {
+    if (isIpv4Address(strictIp)) {
+      return isBlockedSpecialUseIpv4Address(strictIp, blockOptions);
+    }
+    if (isBlockedSpecialUseIpv6Address(strictIp)) {
       return true;
     }
-
-    const isUnspecified =
-      hextets[0] === 0 &&
-      hextets[1] === 0 &&
-      hextets[2] === 0 &&
-      hextets[3] === 0 &&
-      hextets[4] === 0 &&
-      hextets[5] === 0 &&
-      hextets[6] === 0 &&
-      hextets[7] === 0;
-    const isLoopback =
-      hextets[0] === 0 &&
-      hextets[1] === 0 &&
-      hextets[2] === 0 &&
-      hextets[3] === 0 &&
-      hextets[4] === 0 &&
-      hextets[5] === 0 &&
-      hextets[6] === 0 &&
-      hextets[7] === 1;
-    if (isUnspecified || isLoopback) {
-      return true;
-    }
-
-    const embeddedIpv4 = extractIpv4FromEmbeddedIpv6(hextets);
+    const embeddedIpv4 = extractEmbeddedIpv4FromIpv6(strictIp);
     if (embeddedIpv4) {
-      return isPrivateIpv4(embeddedIpv4);
-    }
-
-    // IPv6 private/internal ranges
-    // - link-local: fe80::/10
-    // - site-local (deprecated, but internal): fec0::/10
-    // - unique local: fc00::/7
-    const first = hextets[0];
-    if ((first & 0xffc0) === 0xfe80) {
-      return true;
-    }
-    if ((first & 0xffc0) === 0xfec0) {
-      return true;
-    }
-    if ((first & 0xfe00) === 0xfc00) {
-      return true;
+      return isBlockedSpecialUseIpv4Address(embeddedIpv4, blockOptions);
     }
     return false;
   }
 
-  const ipv4 = parseIpv4(normalized);
-  if (!ipv4) {
-    return false;
+  // Security-critical parse failures should fail closed for any malformed IPv6 literal.
+  if (normalized.includes(":") && !parseLooseIpAddress(normalized)) {
+    return true;
   }
-  return isPrivateIpv4(ipv4);
+
+  if (!isCanonicalDottedDecimalIPv4(normalized) && isLegacyIpv4Literal(normalized)) {
+    return true;
+  }
+  if (looksLikeUnsupportedIpv4Literal(normalized)) {
+    return true;
+  }
+  return false;
 }
 
 export function isBlockedHostname(hostname: string): boolean {
@@ -306,6 +160,10 @@ export function isBlockedHostname(hostname: string): boolean {
   if (!normalized) {
     return false;
   }
+  return isBlockedHostnameNormalized(normalized);
+}
+
+function isBlockedHostnameNormalized(normalized: string): boolean {
   if (BLOCKED_HOSTNAMES.has(normalized)) {
     return true;
   }
@@ -316,12 +174,78 @@ export function isBlockedHostname(hostname: string): boolean {
   );
 }
 
+export function isBlockedHostnameOrIp(hostname: string, policy?: SsrFPolicy): boolean {
+  const normalized = normalizeHostname(hostname);
+  if (!normalized) {
+    return false;
+  }
+  return isBlockedHostnameNormalized(normalized) || isPrivateIpAddress(normalized, policy);
+}
+
+const BLOCKED_HOST_OR_IP_MESSAGE = "Blocked hostname or private/internal/special-use IP address";
+const BLOCKED_RESOLVED_IP_MESSAGE = "Blocked: resolves to private/internal/special-use IP address";
+
+function assertAllowedHostOrIpOrThrow(hostnameOrIp: string, policy?: SsrFPolicy): void {
+  if (isBlockedHostnameOrIp(hostnameOrIp, policy)) {
+    throw new SsrFBlockedError(BLOCKED_HOST_OR_IP_MESSAGE);
+  }
+}
+
+function resolveHostnamePolicyChecks(
+  hostname: string,
+  policy?: SsrFPolicy,
+): {
+  normalized: string;
+  skipPrivateNetworkChecks: boolean;
+} {
+  const normalized = normalizeHostname(hostname);
+  if (!normalized) {
+    throw new Error("Invalid hostname");
+  }
+
+  const hostnameAllowlist = normalizeHostnameAllowlist(policy?.hostnameAllowlist);
+  const skipPrivateNetworkChecks = shouldSkipPrivateNetworkChecks(normalized, policy);
+
+  if (!matchesHostnameAllowlist(normalized, hostnameAllowlist)) {
+    throw new SsrFBlockedError(`Blocked hostname (not in allowlist): ${hostname}`);
+  }
+
+  if (!skipPrivateNetworkChecks) {
+    // Fail fast for literal hosts/IPs before any DNS lookup side-effects.
+    assertAllowedHostOrIpOrThrow(normalized, policy);
+  }
+
+  return { normalized, skipPrivateNetworkChecks };
+}
+
+function assertAllowedResolvedAddressesOrThrow(
+  results: readonly LookupAddress[],
+  policy?: SsrFPolicy,
+): void {
+  for (const entry of results) {
+    // Reuse the exact same host/IP classifier as the pre-DNS check to avoid drift.
+    if (isBlockedHostnameOrIp(entry.address, policy)) {
+      throw new SsrFBlockedError(BLOCKED_RESOLVED_IP_MESSAGE);
+    }
+  }
+}
+
+function normalizeLookupResults(results: LookupResult): readonly LookupAddress[] {
+  if (Array.isArray(results)) {
+    return results;
+  }
+  return [results];
+}
+
 export function createPinnedLookup(params: {
   hostname: string;
   addresses: string[];
   fallback?: typeof dnsLookupCb;
 }): typeof dnsLookupCb {
   const normalizedHost = normalizeHostname(params.hostname);
+  if (params.addresses.length === 0) {
+    throw new Error(`Pinned lookup requires at least one address for ${params.hostname}`);
+  }
   const fallback = params.fallback ?? dnsLookupCb;
   const fallbackLookup = fallback as unknown as (
     hostname: string,
@@ -379,49 +303,74 @@ export type PinnedHostname = {
   lookup: typeof dnsLookupCb;
 };
 
+export type PinnedHostnameOverride = {
+  hostname: string;
+  addresses: string[];
+};
+
+export type PinnedDispatcherPolicy =
+  | {
+      mode: "direct";
+      connect?: Record<string, unknown>;
+      pinnedHostname?: PinnedHostnameOverride;
+    }
+  | {
+      mode: "env-proxy";
+      connect?: Record<string, unknown>;
+      proxyTls?: Record<string, unknown>;
+      pinnedHostname?: PinnedHostnameOverride;
+    }
+  | {
+      mode: "explicit-proxy";
+      proxyUrl: string;
+      allowPrivateProxy?: boolean;
+      proxyTls?: Record<string, unknown>;
+      pinnedHostname?: PinnedHostnameOverride;
+    };
+
+function dedupeAndPreferIpv4(results: readonly LookupAddress[]): string[] {
+  const seen = new Set<string>();
+  const ipv4: string[] = [];
+  const otherFamilies: string[] = [];
+  for (const entry of results) {
+    if (seen.has(entry.address)) {
+      continue;
+    }
+    seen.add(entry.address);
+    if (entry.family === 4) {
+      ipv4.push(entry.address);
+      continue;
+    }
+    otherFamilies.push(entry.address);
+  }
+  return [...ipv4, ...otherFamilies];
+}
+
 export async function resolvePinnedHostnameWithPolicy(
   hostname: string,
   params: { lookupFn?: LookupFn; policy?: SsrFPolicy } = {},
 ): Promise<PinnedHostname> {
-  const normalized = normalizeHostname(hostname);
-  if (!normalized) {
-    throw new Error("Invalid hostname");
-  }
-
-  const allowPrivateNetwork = Boolean(params.policy?.allowPrivateNetwork);
-  const allowedHostnames = normalizeHostnameSet(params.policy?.allowedHostnames);
-  const hostnameAllowlist = normalizeHostnameAllowlist(params.policy?.hostnameAllowlist);
-  const isExplicitAllowed = allowedHostnames.has(normalized);
-
-  if (!matchesHostnameAllowlist(normalized, hostnameAllowlist)) {
-    throw new SsrFBlockedError(`Blocked hostname (not in allowlist): ${hostname}`);
-  }
-
-  if (!allowPrivateNetwork && !isExplicitAllowed) {
-    if (isBlockedHostname(normalized)) {
-      throw new SsrFBlockedError(`Blocked hostname: ${hostname}`);
-    }
-
-    if (isPrivateIpAddress(normalized)) {
-      throw new SsrFBlockedError("Blocked: private/internal IP address");
-    }
-  }
+  const { normalized, skipPrivateNetworkChecks } = resolveHostnamePolicyChecks(
+    hostname,
+    params.policy,
+  );
 
   const lookupFn = params.lookupFn ?? dnsLookup;
-  const results = await lookupFn(normalized, { all: true });
+  const results = normalizeLookupResults(
+    (await lookupFn(normalized, { all: true })) as LookupResult,
+  );
   if (results.length === 0) {
     throw new Error(`Unable to resolve hostname: ${hostname}`);
   }
 
-  if (!allowPrivateNetwork && !isExplicitAllowed) {
-    for (const entry of results) {
-      if (isPrivateIpAddress(entry.address)) {
-        throw new SsrFBlockedError("Blocked: resolves to private/internal IP address");
-      }
-    }
+  if (!skipPrivateNetworkChecks) {
+    // Phase 2: re-check DNS answers so public hostnames cannot pivot to private targets.
+    assertAllowedResolvedAddressesOrThrow(results, params.policy);
   }
 
-  const addresses = Array.from(new Set(results.map((entry) => entry.address)));
+  // Prefer addresses returned as IPv4 by DNS family metadata before other
+  // families so Happy Eyeballs and pinned round-robin both attempt IPv4 first.
+  const addresses = dedupeAndPreferIpv4(results);
   if (addresses.length === 0) {
     throw new Error(`Unable to resolve hostname: ${hostname}`);
   }
@@ -433,6 +382,10 @@ export async function resolvePinnedHostnameWithPolicy(
   };
 }
 
+export function assertHostnameAllowedWithPolicy(hostname: string, policy?: SsrFPolicy): string {
+  return resolveHostnamePolicyChecks(hostname, policy).normalized;
+}
+
 export async function resolvePinnedHostname(
   hostname: string,
   lookupFn: LookupFn = dnsLookup,
@@ -440,11 +393,72 @@ export async function resolvePinnedHostname(
   return await resolvePinnedHostnameWithPolicy(hostname, { lookupFn });
 }
 
-export function createPinnedDispatcher(pinned: PinnedHostname): Dispatcher {
-  return new Agent({
-    connect: {
-      lookup: pinned.lookup,
-    },
+function withPinnedLookup(
+  lookup: PinnedHostname["lookup"],
+  connect?: Record<string, unknown>,
+): Record<string, unknown> {
+  return connect ? { ...connect, lookup } : { lookup };
+}
+
+function resolvePinnedDispatcherLookup(
+  pinned: PinnedHostname,
+  override?: PinnedHostnameOverride,
+  policy?: SsrFPolicy,
+): PinnedHostname["lookup"] {
+  if (!override) {
+    return pinned.lookup;
+  }
+  const normalizedOverrideHost = normalizeHostname(override.hostname);
+  if (!normalizedOverrideHost || normalizedOverrideHost !== pinned.hostname) {
+    throw new Error(
+      `Pinned dispatcher override hostname mismatch: expected ${pinned.hostname}, got ${override.hostname}`,
+    );
+  }
+  const records = override.addresses.map((address) => ({
+    address,
+    family: address.includes(":") ? 6 : 4,
+  }));
+  if (!shouldSkipPrivateNetworkChecks(pinned.hostname, policy)) {
+    assertAllowedResolvedAddressesOrThrow(records, policy);
+  }
+  return createPinnedLookup({
+    hostname: pinned.hostname,
+    addresses: [...override.addresses],
+    fallback: pinned.lookup,
+  });
+}
+
+export function createPinnedDispatcher(
+  pinned: PinnedHostname,
+  policy?: PinnedDispatcherPolicy,
+  ssrfPolicy?: SsrFPolicy,
+): Dispatcher {
+  const lookup = resolvePinnedDispatcherLookup(pinned, policy?.pinnedHostname, ssrfPolicy);
+
+  if (!policy || policy.mode === "direct") {
+    return createHttp1Agent({
+      connect: withPinnedLookup(lookup, policy?.connect),
+    });
+  }
+
+  if (policy.mode === "env-proxy") {
+    return createHttp1EnvHttpProxyAgent({
+      connect: withPinnedLookup(lookup, policy.connect),
+      ...(policy.proxyTls ? { proxyTls: { ...policy.proxyTls } } : {}),
+    });
+  }
+
+  const proxyUrl = policy.proxyUrl.trim();
+  const requestTls = withPinnedLookup(lookup, policy.proxyTls);
+  if (!requestTls) {
+    return createHttp1ProxyAgent({ uri: proxyUrl });
+  }
+  return createHttp1ProxyAgent({
+    uri: proxyUrl,
+    // `PinnedDispatcherPolicy.proxyTls` historically carried target-hop
+    // transport hints for explicit proxies. Translate that to undici's
+    // `requestTls` so HTTPS proxy tunnels keep the pinned DNS lookup.
+    requestTls,
   });
 }
 

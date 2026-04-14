@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectMime } from "../media/mime.js";
+import { lowercasePreservingWhitespace } from "../shared/string-coerce.js";
 import { resolveFileWithinRoot } from "./file-resolver.js";
 
 export const A2UI_PATH = "/__openclaw__/a2ui";
@@ -13,14 +14,29 @@ export const CANVAS_WS_PATH = "/__openclaw__/ws";
 
 let cachedA2uiRootReal: string | null | undefined;
 let resolvingA2uiRoot: Promise<string | null> | null = null;
+let cachedA2uiResolvedAtMs = 0;
+const A2UI_ROOT_RETRY_NULL_AFTER_MS = 10_000;
 
 async function resolveA2uiRoot(): Promise<string | null> {
   const here = path.dirname(fileURLToPath(import.meta.url));
+  const entryDir = process.argv[1] ? path.dirname(path.resolve(process.argv[1])) : null;
   const candidates = [
-    // Running from source (bun) or dist (tsc + copied assets).
+    // Running from source (bun) or dist/canvas-host chunk.
     path.resolve(here, "a2ui"),
+    // Running from dist root chunk (common launchd path).
+    path.resolve(here, "canvas-host/a2ui"),
+    path.resolve(here, "../canvas-host/a2ui"),
+    // Entry path fallbacks (helps when cwd is not the repo root).
+    ...(entryDir
+      ? [
+          path.resolve(entryDir, "a2ui"),
+          path.resolve(entryDir, "canvas-host/a2ui"),
+          path.resolve(entryDir, "../canvas-host/a2ui"),
+        ]
+      : []),
     // Running from dist without copied assets (fallback to source).
     path.resolve(here, "../../src/canvas-host/a2ui"),
+    path.resolve(here, "../src/canvas-host/a2ui"),
     // Running from repo root.
     path.resolve(process.cwd(), "src/canvas-host/a2ui"),
     path.resolve(process.cwd(), "dist/canvas-host/a2ui"),
@@ -44,13 +60,19 @@ async function resolveA2uiRoot(): Promise<string | null> {
 }
 
 async function resolveA2uiRootReal(): Promise<string | null> {
-  if (cachedA2uiRootReal !== undefined) {
+  const nowMs = Date.now();
+  if (
+    cachedA2uiRootReal !== undefined &&
+    (cachedA2uiRootReal !== null || nowMs - cachedA2uiResolvedAtMs < A2UI_ROOT_RETRY_NULL_AFTER_MS)
+  ) {
     return cachedA2uiRootReal;
   }
   if (!resolvingA2uiRoot) {
     resolvingA2uiRoot = (async () => {
       const root = await resolveA2uiRoot();
       cachedA2uiRootReal = root ? await fs.realpath(root) : null;
+      cachedA2uiResolvedAtMs = Date.now();
+      resolvingA2uiRoot = null;
       return cachedA2uiRootReal;
     })();
   }
@@ -99,8 +121,10 @@ export function injectCanvasLiveReload(html: string): string {
   globalThis.openclawSendUserAction = sendUserAction;
 
   try {
+    const cap = new URLSearchParams(location.search).get("oc_cap");
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(proto + "://" + location.host + ${JSON.stringify(CANVAS_WS_PATH)});
+    const capQuery = cap ? "?oc_cap=" + encodeURIComponent(cap) : "";
+    const ws = new WebSocket(proto + "://" + location.host + ${JSON.stringify(CANVAS_WS_PATH)} + capQuery);
     ws.onmessage = (ev) => {
       if (String(ev.data || "") === "reload") location.reload();
     };
@@ -109,7 +133,7 @@ export function injectCanvasLiveReload(html: string): string {
 </script>
 `.trim();
 
-  const idx = html.toLowerCase().lastIndexOf("</body>");
+  const idx = lowercasePreservingWhitespace(html).lastIndexOf("</body>");
   if (idx >= 0) {
     return `${html.slice(0, idx)}\n${snippet}\n${html.slice(idx)}`;
   }
@@ -157,7 +181,7 @@ export async function handleA2uiHttpRequest(
   }
 
   try {
-    const lower = result.realPath.toLowerCase();
+    const lower = lowercasePreservingWhitespace(result.realPath);
     const mime =
       lower.endsWith(".html") || lower.endsWith(".htm")
         ? "text/html"

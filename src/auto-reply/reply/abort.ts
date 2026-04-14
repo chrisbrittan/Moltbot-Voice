@@ -1,98 +1,94 @@
+import { getAcpSessionManager } from "../../acp/control-plane/manager.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
-import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
+import { abortEmbeddedPiRun } from "../../agents/pi-embedded-runner/runs.js";
 import {
-  listSubagentRunsForRequester,
+  getLatestSubagentRunByChildSessionKey,
+  listSubagentRunsForController,
   markSubagentRunTerminated,
 } from "../../agents/subagent-registry.js";
+import type { SubagentRunRecord } from "../../agents/subagent-registry.js";
 import {
   resolveInternalSessionKey,
   resolveMainSessionAlias,
 } from "../../agents/tools/sessions-helpers.js";
-import type { OpenClawConfig } from "../../config/config.js";
 import {
   loadSessionStore,
+  resolveSessionStoreEntry,
   resolveStorePath,
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
+import { formatErrorMessage } from "../../infra/errors.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "../../shared/string-coerce.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
-import { normalizeCommandBody, type CommandNormalizeOptions } from "../commands-registry.js";
-import type { FinalizedMsgContext, MsgContext } from "../templating.js";
+import type { FinalizedMsgContext } from "../templating.js";
+import {
+  applyAbortCutoffToSessionEntry,
+  resolveAbortCutoffFromContext,
+  shouldPersistAbortCutoff,
+} from "./abort-cutoff.js";
+import {
+  getAbortMemory,
+  getAbortMemorySizeForTest,
+  isAbortRequestText,
+  isAbortTrigger,
+  resetAbortMemoryForTest,
+  setAbortMemory,
+} from "./abort-primitives.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { clearSessionQueues } from "./queue.js";
+import { replyRunRegistry } from "./reply-run-registry.js";
 
-const ABORT_TRIGGERS = new Set(["stop", "esc", "abort", "wait", "exit", "interrupt"]);
-const ABORT_MEMORY = new Map<string, boolean>();
-const ABORT_MEMORY_MAX = 2000;
+export { resolveAbortCutoffFromContext, shouldSkipMessageByAbortCutoff } from "./abort-cutoff.js";
+export {
+  getAbortMemory,
+  getAbortMemorySizeForTest,
+  isAbortRequestText,
+  isAbortTrigger,
+  resetAbortMemoryForTest,
+  setAbortMemory,
+};
 
-export function isAbortTrigger(text?: string): boolean {
-  if (!text) {
-    return false;
-  }
-  const normalized = text.trim().toLowerCase();
-  return ABORT_TRIGGERS.has(normalized);
-}
+const defaultAbortDeps = {
+  getAcpSessionManager,
+  abortEmbeddedPiRun,
+  getLatestSubagentRunByChildSessionKey,
+  listSubagentRunsForController,
+  markSubagentRunTerminated,
+};
 
-export function isAbortRequestText(text?: string, options?: CommandNormalizeOptions): boolean {
-  if (!text) {
-    return false;
-  }
-  const normalized = normalizeCommandBody(text, options).trim();
-  if (!normalized) {
-    return false;
-  }
-  return normalized.toLowerCase() === "/stop" || isAbortTrigger(normalized);
-}
+const abortDeps = {
+  ...defaultAbortDeps,
+};
 
-export function getAbortMemory(key: string): boolean | undefined {
-  const normalized = key.trim();
-  if (!normalized) {
-    return undefined;
-  }
-  return ABORT_MEMORY.get(normalized);
-}
-
-function pruneAbortMemory(): void {
-  if (ABORT_MEMORY.size <= ABORT_MEMORY_MAX) {
-    return;
-  }
-  const excess = ABORT_MEMORY.size - ABORT_MEMORY_MAX;
-  let removed = 0;
-  for (const entryKey of ABORT_MEMORY.keys()) {
-    ABORT_MEMORY.delete(entryKey);
-    removed += 1;
-    if (removed >= excess) {
-      break;
-    }
-  }
-}
-
-export function setAbortMemory(key: string, value: boolean): void {
-  const normalized = key.trim();
-  if (!normalized) {
-    return;
-  }
-  if (!value) {
-    ABORT_MEMORY.delete(normalized);
-    return;
-  }
-  // Refresh insertion order so active keys are less likely to be evicted.
-  if (ABORT_MEMORY.has(normalized)) {
-    ABORT_MEMORY.delete(normalized);
-  }
-  ABORT_MEMORY.set(normalized, true);
-  pruneAbortMemory();
-}
-
-export function getAbortMemorySizeForTest(): number {
-  return ABORT_MEMORY.size;
-}
-
-export function resetAbortMemoryForTest(): void {
-  ABORT_MEMORY.clear();
-}
+export const __testing = {
+  setDepsForTests(deps: Partial<typeof defaultAbortDeps> | undefined): void {
+    abortDeps.getAcpSessionManager =
+      deps?.getAcpSessionManager ?? defaultAbortDeps.getAcpSessionManager;
+    abortDeps.abortEmbeddedPiRun = deps?.abortEmbeddedPiRun ?? defaultAbortDeps.abortEmbeddedPiRun;
+    abortDeps.getLatestSubagentRunByChildSessionKey =
+      deps?.getLatestSubagentRunByChildSessionKey ??
+      defaultAbortDeps.getLatestSubagentRunByChildSessionKey;
+    abortDeps.listSubagentRunsForController =
+      deps?.listSubagentRunsForController ?? defaultAbortDeps.listSubagentRunsForController;
+    abortDeps.markSubagentRunTerminated =
+      deps?.markSubagentRunTerminated ?? defaultAbortDeps.markSubagentRunTerminated;
+  },
+  resetDepsForTests(): void {
+    abortDeps.getAcpSessionManager = defaultAbortDeps.getAcpSessionManager;
+    abortDeps.abortEmbeddedPiRun = defaultAbortDeps.abortEmbeddedPiRun;
+    abortDeps.getLatestSubagentRunByChildSessionKey =
+      defaultAbortDeps.getLatestSubagentRunByChildSessionKey;
+    abortDeps.listSubagentRunsForController = defaultAbortDeps.listSubagentRunsForController;
+    abortDeps.markSubagentRunTerminated = defaultAbortDeps.markSubagentRunTerminated;
+  },
+};
 
 export function formatAbortReplyText(stoppedSubagents?: number): string {
   if (typeof stoppedSubagents !== "number" || stoppedSubagents <= 0) {
@@ -102,34 +98,34 @@ export function formatAbortReplyText(stoppedSubagents?: number): string {
   return `⚙️ Agent was aborted. Stopped ${stoppedSubagents} ${label}.`;
 }
 
-function resolveSessionEntryForKey(
+export function resolveSessionEntryForKey(
   store: Record<string, SessionEntry> | undefined,
   sessionKey: string | undefined,
-) {
+): { entry?: SessionEntry; key?: string; legacyKeys?: string[] } {
   if (!store || !sessionKey) {
     return {};
   }
-  const direct = store[sessionKey];
-  if (direct) {
-    return { entry: direct, key: sessionKey };
+  const resolved = resolveSessionStoreEntry({ store, sessionKey });
+  if (resolved.existing) {
+    return resolved.legacyKeys.length > 0
+      ? {
+          entry: resolved.existing,
+          key: resolved.normalizedKey,
+          legacyKeys: resolved.legacyKeys,
+        }
+      : {
+          entry: resolved.existing,
+          key: resolved.normalizedKey,
+        };
   }
   return {};
-}
-
-function resolveAbortTargetKey(ctx: MsgContext): string | undefined {
-  const target = ctx.CommandTargetSessionKey?.trim();
-  if (target) {
-    return target;
-  }
-  const sessionKey = ctx.SessionKey?.trim();
-  return sessionKey || undefined;
 }
 
 function normalizeRequesterSessionKey(
   cfg: OpenClawConfig,
   key: string | undefined,
 ): string | undefined {
-  const cleaned = key?.trim();
+  const cleaned = normalizeOptionalString(key);
   if (!cleaned) {
     return undefined;
   }
@@ -145,7 +141,32 @@ export function stopSubagentsForRequester(params: {
   if (!requesterKey) {
     return { stopped: 0 };
   }
-  const runs = listSubagentRunsForRequester(requesterKey);
+  const dedupedRunsByChildKey = new Map<string, SubagentRunRecord>();
+  for (const run of abortDeps.listSubagentRunsForController(requesterKey)) {
+    const childKey = normalizeOptionalString(run.childSessionKey);
+    if (!childKey) {
+      continue;
+    }
+    const latest = abortDeps.getLatestSubagentRunByChildSessionKey(childKey);
+    if (!latest) {
+      const existing = dedupedRunsByChildKey.get(childKey);
+      if (!existing || run.createdAt >= existing.createdAt) {
+        dedupedRunsByChildKey.set(childKey, run);
+      }
+      continue;
+    }
+    const latestControllerSessionKey =
+      normalizeOptionalString(latest?.controllerSessionKey) ??
+      normalizeOptionalString(latest?.requesterSessionKey);
+    if (latest.runId !== run.runId || latestControllerSessionKey !== requesterKey) {
+      continue;
+    }
+    const existing = dedupedRunsByChildKey.get(childKey);
+    if (!existing || run.createdAt >= existing.createdAt) {
+      dedupedRunsByChildKey.set(childKey, run);
+    }
+  }
+  const runs = Array.from(dedupedRunsByChildKey.values());
   if (runs.length === 0) {
     return { stopped: 0 };
   }
@@ -155,7 +176,7 @@ export function stopSubagentsForRequester(params: {
   let stopped = 0;
 
   for (const run of runs) {
-    const childKey = run.childSessionKey?.trim();
+    const childKey = normalizeOptionalString(run.childSessionKey);
     if (!childKey || seenChildKeys.has(childKey)) {
       continue;
     }
@@ -171,10 +192,12 @@ export function stopSubagentsForRequester(params: {
         storeCache.set(storePath, store);
       }
       const entry = store[childKey];
-      const sessionId = entry?.sessionId;
-      const aborted = sessionId ? abortEmbeddedPiRun(sessionId) : false;
+      const sessionId = replyRunRegistry.resolveSessionId(childKey) ?? entry?.sessionId;
+      const aborted =
+        (childKey ? replyRunRegistry.abort(childKey) : false) ||
+        (sessionId ? abortDeps.abortEmbeddedPiRun(sessionId) : false);
       const markedTerminated =
-        markSubagentRunTerminated({
+        abortDeps.markSubagentRunTerminated({
           runId: run.runId,
           childSessionKey: childKey,
           reason: "killed",
@@ -204,15 +227,22 @@ export async function tryFastAbortFromMessage(params: {
   cfg: OpenClawConfig;
 }): Promise<{ handled: boolean; aborted: boolean; stoppedSubagents?: number }> {
   const { ctx, cfg } = params;
-  const targetKey = resolveAbortTargetKey(ctx);
-  const agentId = resolveSessionAgentId({
-    sessionKey: targetKey ?? ctx.SessionKey ?? "",
-    config: cfg,
-  });
+  const targetKey =
+    normalizeOptionalString(ctx.CommandTargetSessionKey) ?? normalizeOptionalString(ctx.SessionKey);
   // Use RawBody/CommandBody for abort detection (clean message without structural context).
   const raw = stripStructuralPrefixes(ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "");
-  const isGroup = ctx.ChatType?.trim().toLowerCase() === "group";
-  const stripped = isGroup ? stripMentions(raw, ctx, cfg, agentId) : raw;
+  const isGroup = normalizeOptionalLowercaseString(ctx.ChatType) === "group";
+  const stripped = isGroup
+    ? stripMentions(
+        raw,
+        ctx,
+        cfg,
+        resolveSessionAgentId({
+          sessionKey: targetKey ?? ctx.SessionKey ?? "",
+          config: cfg,
+        }),
+      )
+    : raw;
   const abortRequested = isAbortRequestText(stripped);
   if (!abortRequested) {
     return { handled: false, aborted: false };
@@ -228,33 +258,76 @@ export async function tryFastAbortFromMessage(params: {
     return { handled: false, aborted: false };
   }
 
+  const agentId = resolveSessionAgentId({
+    sessionKey: targetKey ?? ctx.SessionKey ?? "",
+    config: cfg,
+  });
   const abortKey = targetKey ?? auth.from ?? auth.to;
   const requesterSessionKey = targetKey ?? ctx.SessionKey ?? abortKey;
 
   if (targetKey) {
     const storePath = resolveStorePath(cfg.session?.store, { agentId });
     const store = loadSessionStore(storePath);
-    const { entry, key } = resolveSessionEntryForKey(store, targetKey);
-    const sessionId = entry?.sessionId;
-    const aborted = sessionId ? abortEmbeddedPiRun(sessionId) : false;
-    const cleared = clearSessionQueues([key ?? targetKey, sessionId]);
+    const { entry, key, legacyKeys } = resolveSessionEntryForKey(store, targetKey);
+    const resolvedTargetKey = key ?? targetKey;
+    const acpManager = abortDeps.getAcpSessionManager();
+    const acpResolution = acpManager.resolveSession({
+      cfg,
+      sessionKey: resolvedTargetKey,
+    });
+    if (acpResolution.kind !== "none") {
+      try {
+        await acpManager.cancelSession({
+          cfg,
+          sessionKey: resolvedTargetKey,
+          reason: "fast-abort",
+        });
+      } catch (error) {
+        logVerbose(
+          `abort: ACP cancel failed for ${resolvedTargetKey}: ${formatErrorMessage(error)}`,
+        );
+      }
+    }
+    const sessionId = replyRunRegistry.resolveSessionId(resolvedTargetKey) ?? entry?.sessionId;
+    const aborted =
+      replyRunRegistry.abort(resolvedTargetKey) ||
+      (sessionId ? abortDeps.abortEmbeddedPiRun(sessionId) : false);
+    const cleared = clearSessionQueues([resolvedTargetKey, sessionId]);
     if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
       logVerbose(
         `abort: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
       );
     }
+    const abortCutoff = shouldPersistAbortCutoff({
+      commandSessionKey: ctx.SessionKey,
+      targetSessionKey: resolvedTargetKey,
+    })
+      ? resolveAbortCutoffFromContext(ctx)
+      : undefined;
     if (entry && key) {
       entry.abortedLastRun = true;
+      applyAbortCutoffToSessionEntry(entry, abortCutoff);
       entry.updatedAt = Date.now();
       store[key] = entry;
+      for (const legacyKey of legacyKeys ?? []) {
+        if (legacyKey !== key) {
+          delete store[legacyKey];
+        }
+      }
       await updateSessionStore(storePath, (nextStore) => {
         const nextEntry = nextStore[key] ?? entry;
         if (!nextEntry) {
           return;
         }
         nextEntry.abortedLastRun = true;
+        applyAbortCutoffToSessionEntry(nextEntry, abortCutoff);
         nextEntry.updatedAt = Date.now();
         nextStore[key] = nextEntry;
+        for (const legacyKey of legacyKeys ?? []) {
+          if (legacyKey !== key) {
+            delete nextStore[legacyKey];
+          }
+        }
       });
     } else if (abortKey) {
       setAbortMemory(abortKey, true);

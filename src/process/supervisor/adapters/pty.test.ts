@@ -1,4 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  expectRealExitWinsOverSigkillFallback,
+  expectWaitStaysPendingUntilSigkillFallback,
+} from "./test-support.js";
 
 const { spawnMock, ptyKillMock, killProcessTreeMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(),
@@ -31,17 +35,27 @@ function createStubPty(pid = 1234) {
   };
 }
 
+function expectSpawnEnv() {
+  const spawnOptions = spawnMock.mock.calls[0]?.[2] as { env?: Record<string, string> };
+  return spawnOptions?.env;
+}
+
 describe("createPtyAdapter", () => {
+  let createPtyAdapter: typeof import("./pty.js").createPtyAdapter;
+
+  beforeAll(async () => {
+    ({ createPtyAdapter } = await import("./pty.js"));
+  });
+
   beforeEach(() => {
-    spawnMock.mockReset();
-    ptyKillMock.mockReset();
-    killProcessTreeMock.mockReset();
+    spawnMock.mockClear();
+    ptyKillMock.mockClear();
+    killProcessTreeMock.mockClear();
     vi.useRealTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    vi.resetModules();
     vi.clearAllMocks();
   });
 
@@ -50,7 +64,6 @@ describe("createPtyAdapter", () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     try {
       spawnMock.mockReturnValue(createStubPty());
-      const { createPtyAdapter } = await import("./pty.js");
 
       const adapter = await createPtyAdapter({
         shell: "bash",
@@ -69,7 +82,6 @@ describe("createPtyAdapter", () => {
 
   it("uses process-tree kill for SIGKILL by default", async () => {
     spawnMock.mockReturnValue(createStubPty());
-    const { createPtyAdapter } = await import("./pty.js");
 
     const adapter = await createPtyAdapter({
       shell: "bash",
@@ -84,54 +96,42 @@ describe("createPtyAdapter", () => {
   it("wait does not settle immediately on SIGKILL", async () => {
     vi.useFakeTimers();
     spawnMock.mockReturnValue(createStubPty());
-    const { createPtyAdapter } = await import("./pty.js");
 
     const adapter = await createPtyAdapter({
       shell: "bash",
       args: ["-lc", "sleep 10"],
     });
 
-    const waitPromise = adapter.wait();
-    const settled = vi.fn();
-    void waitPromise.then(() => settled());
-
-    adapter.kill();
-
-    await Promise.resolve();
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(3999);
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(1);
-    await expect(waitPromise).resolves.toEqual({ code: null, signal: "SIGKILL" });
+    await expectWaitStaysPendingUntilSigkillFallback(adapter.wait(), () => {
+      adapter.kill();
+    });
   });
 
   it("prefers real PTY exit over SIGKILL fallback settle", async () => {
     vi.useFakeTimers();
     const stub = createStubPty();
     spawnMock.mockReturnValue(stub);
-    const { createPtyAdapter } = await import("./pty.js");
 
     const adapter = await createPtyAdapter({
       shell: "bash",
       args: ["-lc", "sleep 10"],
     });
 
-    const waitPromise = adapter.wait();
-    adapter.kill();
-    stub.emitExit({ exitCode: 0, signal: 9 });
-
-    await expect(waitPromise).resolves.toEqual({ code: 0, signal: 9 });
-
-    await vi.advanceTimersByTimeAsync(10_000);
-    await expect(adapter.wait()).resolves.toEqual({ code: 0, signal: 9 });
+    await expectRealExitWinsOverSigkillFallback({
+      waitPromise: adapter.wait(),
+      triggerKill: () => {
+        adapter.kill();
+      },
+      emitExit: () => {
+        stub.emitExit({ exitCode: 0, signal: 9 });
+      },
+      expected: { code: 0, signal: 9 },
+    });
   });
 
   it("resolves wait when exit fires before wait is called", async () => {
     const stub = createStubPty();
     spawnMock.mockReturnValue(stub);
-    const { createPtyAdapter } = await import("./pty.js");
 
     const adapter = await createPtyAdapter({
       shell: "bash",
@@ -146,21 +146,18 @@ describe("createPtyAdapter", () => {
   it("keeps inherited env when no override env is provided", async () => {
     const stub = createStubPty();
     spawnMock.mockReturnValue(stub);
-    const { createPtyAdapter } = await import("./pty.js");
 
     await createPtyAdapter({
       shell: "bash",
       args: ["-lc", "env"],
     });
 
-    const spawnOptions = spawnMock.mock.calls[0]?.[2] as { env?: Record<string, string> };
-    expect(spawnOptions?.env).toBeUndefined();
+    expect(expectSpawnEnv()).toBeUndefined();
   });
 
   it("passes explicit env overrides as strings", async () => {
     const stub = createStubPty();
     spawnMock.mockReturnValue(stub);
-    const { createPtyAdapter } = await import("./pty.js");
 
     await createPtyAdapter({
       shell: "bash",
@@ -168,8 +165,7 @@ describe("createPtyAdapter", () => {
       env: { FOO: "bar", COUNT: "12", DROP_ME: undefined },
     });
 
-    const spawnOptions = spawnMock.mock.calls[0]?.[2] as { env?: Record<string, string> };
-    expect(spawnOptions?.env).toEqual({ FOO: "bar", COUNT: "12" });
+    expect(expectSpawnEnv()).toEqual({ FOO: "bar", COUNT: "12" });
   });
 
   it("does not pass a signal to node-pty on Windows", async () => {
@@ -177,7 +173,6 @@ describe("createPtyAdapter", () => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
       spawnMock.mockReturnValue(createStubPty());
-      const { createPtyAdapter } = await import("./pty.js");
 
       const adapter = await createPtyAdapter({
         shell: "powershell.exe",
@@ -199,7 +194,6 @@ describe("createPtyAdapter", () => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
       spawnMock.mockReturnValue(createStubPty(4567));
-      const { createPtyAdapter } = await import("./pty.js");
 
       const adapter = await createPtyAdapter({
         shell: "powershell.exe",

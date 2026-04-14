@@ -5,6 +5,7 @@ import os
 import SwiftUI
 import UIKit
 
+// swiftlint:disable type_body_length
 struct SettingsTab: View {
     private struct FeatureHelp: Identifiable {
         let id = UUID()
@@ -22,7 +23,6 @@ struct SettingsTab: View {
     @AppStorage("talk.enabled") private var talkEnabled: Bool = false
     @AppStorage("talk.button.enabled") private var talkButtonEnabled: Bool = true
     @AppStorage("talk.background.enabled") private var talkBackgroundEnabled: Bool = false
-    @AppStorage("talk.voiceDirectiveHint.enabled") private var talkVoiceDirectiveHintEnabled: Bool = true
     @AppStorage("camera.enabled") private var cameraEnabled: Bool = true
     @AppStorage("location.enabledMode") private var locationEnabledModeRaw: String = OpenClawLocationMode.off.rawValue
     @AppStorage("screen.preventSleep") private var preventSleep: Bool = true
@@ -53,6 +53,7 @@ struct SettingsTab: View {
     @State private var selectedAgentPickerId: String = ""
 
     @State private var showResetOnboardingAlert: Bool = false
+    @State private var showGatewayProblemDetails: Bool = false
     @State private var activeFeatureHelp: FeatureHelp?
     @State private var suppressCredentialPersist: Bool = false
 
@@ -63,12 +64,26 @@ struct SettingsTab: View {
             Form {
                 Section {
                     DisclosureGroup(isExpanded: self.$gatewayExpanded) {
+                        if let gatewayProblem = self.appModel.lastGatewayProblem,
+                           !self.isGatewayConnected
+                        {
+                            GatewayProblemBanner(
+                                problem: gatewayProblem,
+                                primaryActionTitle: "Retry connection",
+                                onPrimaryAction: {
+                                    Task { await self.retryGatewayConnectionFromProblem() }
+                                },
+                                onShowDetails: {
+                                    self.showGatewayProblemDetails = true
+                                })
+                        }
+
                         if !self.isGatewayConnected {
                             Text(
-                                "1. Open Telegram and message your bot: /pair\n"
+                                "1. Open a chat with your OpenClaw agent and send /pair\n"
                                     + "2. Copy the setup code it returns\n"
                                     + "3. Paste here and tap Connect\n"
-                                    + "4. Back in Telegram, run /pair approve")
+                                    + "4. Back in that chat, run /pair approve")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
 
@@ -123,7 +138,7 @@ struct SettingsTab: View {
                         if self.appModel.gatewayServerName == nil {
                             LabeledContent("Discovery", value: self.gatewayController.discoveryStatusText)
                         }
-                        LabeledContent("Status", value: self.appModel.gatewayStatusText)
+                        LabeledContent("Status", value: self.appModel.gatewayDisplayStatusText)
                         Toggle("Auto-connect on launch", isOn: self.$gatewayAutoConnect)
 
                         if let serverName = self.appModel.gatewayServerName {
@@ -229,7 +244,10 @@ struct SettingsTab: View {
                                     .foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(10)
-                                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .background(
+                                        .thinMaterial,
+                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    )
                             }
                         }
                     } label: {
@@ -276,7 +294,9 @@ struct SettingsTab: View {
                         self.featureToggle(
                             "Allow Camera",
                             isOn: self.$cameraEnabled,
-                            help: "Allows the gateway to request photos or short video clips while OpenClaw is foregrounded.")
+                            help: "Allows the gateway to request photos or short video clips "
+                                + "while OpenClaw is foregrounded."
+                        )
 
                         HStack(spacing: 8) {
                             Text("Location Access")
@@ -284,7 +304,11 @@ struct SettingsTab: View {
                             Button {
                                 self.activeFeatureHelp = FeatureHelp(
                                     title: "Location Access",
-                                    message: "Controls location permissions for OpenClaw. Off disables location tools, While Using enables foreground location, and Always enables background location.")
+                                    message: "Controls location permissions for OpenClaw. "
+                                        + "Off disables location tools, While Using enables "
+                                        + "foreground location, and Always enables "
+                                        + "background location."
+                                )
                             } label: {
                                 Image(systemName: "info.circle")
                                     .foregroundStyle(.secondary)
@@ -306,14 +330,34 @@ struct SettingsTab: View {
                             help: "Keeps the screen awake while OpenClaw is open.")
 
                         DisclosureGroup("Advanced") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Talk Voice (Gateway)")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                LabeledContent("Provider", value: "ElevenLabs")
+                                LabeledContent(
+                                    "API Key",
+                                    value: self.appModel.talkMode.gatewayTalkConfigLoaded
+                                        ? (
+                                            self.appModel.talkMode.gatewayTalkApiKeyConfigured
+                                                ? "Configured"
+                                                : "Not configured"
+                                        )
+                                        : "Not loaded")
+                                LabeledContent(
+                                    "Default Model",
+                                    value: self.appModel.talkMode.gatewayTalkDefaultModelId ?? "eleven_v3 (fallback)")
+                                LabeledContent(
+                                    "Default Voice",
+                                    value: self.appModel.talkMode.gatewayTalkDefaultVoiceId ?? "auto (first available)")
+                                Text("Configured on gateway via talk.apiKey, talk.modelId, and talk.voiceId.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
                             self.featureToggle(
-                                "Voice Directive Hint",
-                                isOn: self.$talkVoiceDirectiveHintEnabled,
-                                help: "Adds voice-switching instructions to Talk prompts. Disable to reduce prompt size.")
-                            self.featureToggle(
-                                "Show Talk Button",
+                                "Show Talk Control",
                                 isOn: self.$talkButtonEnabled,
-                                help: "Shows the floating Talk button in the main interface.")
+                                help: "Shows the Talk control in the main toolbar.")
                             TextField("Default Share Instruction", text: self.$defaultShareInstruction, axis: .vertical)
                                 .lineLimit(2 ... 6)
                                 .textInputAutocapitalization(.sentences)
@@ -325,7 +369,9 @@ struct SettingsTab: View {
                                 Button {
                                     self.activeFeatureHelp = FeatureHelp(
                                         title: "Default Share Instruction",
-                                        message: "Appends this instruction when sharing content into OpenClaw from iOS.")
+                                        message: "Appends this instruction when sharing content "
+                                            + "into OpenClaw from iOS."
+                                    )
                                 } label: {
                                     Image(systemName: "info.circle")
                                         .foregroundStyle(.secondary)
@@ -354,9 +400,9 @@ struct SettingsTab: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        LabeledContent("Device", value: self.deviceFamily())
-                        LabeledContent("Platform", value: self.platformString())
-                        LabeledContent("OpenClaw", value: self.openClawVersionString())
+                        LabeledContent("Device", value: DeviceInfoHelper.deviceFamily())
+                        LabeledContent("Platform", value: DeviceInfoHelper.platformStringForDisplay())
+                        LabeledContent("OpenClaw", value: DeviceInfoHelper.openClawVersionString())
                     }
                 }
             }
@@ -371,6 +417,16 @@ struct SettingsTab: View {
                     .accessibilityLabel("Close")
                 }
             }
+            .sheet(isPresented: self.$showGatewayProblemDetails) {
+                if let gatewayProblem = self.appModel.lastGatewayProblem {
+                    GatewayProblemDetailsSheet(
+                        problem: gatewayProblem,
+                        primaryActionTitle: "Retry",
+                        onPrimaryAction: {
+                            Task { await self.retryGatewayConnectionFromProblem() }
+                        })
+                }
+            }
             .alert("Reset Onboarding?", isPresented: self.$showResetOnboardingAlert) {
                 Button("Reset", role: .destructive) {
                     self.resetOnboarding()
@@ -378,7 +434,9 @@ struct SettingsTab: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text(
-                    "This will disconnect, clear saved gateway connection + credentials, and reopen the onboarding wizard.")
+                    "This will disconnect, clear saved gateway connection + credentials, "
+                        + "and reopen the onboarding wizard."
+                )
             }
             .alert(item: self.$activeFeatureHelp) { help in
                 Alert(
@@ -399,6 +457,9 @@ struct SettingsTab: View {
                 // Keep setup front-and-center when disconnected; keep things compact once connected.
                 self.gatewayExpanded = !self.isGatewayConnected
                 self.selectedAgentPickerId = self.appModel.selectedAgentId ?? ""
+                if self.isGatewayConnected {
+                    self.appModel.reloadTalkConfig()
+                }
             }
             .onChange(of: self.selectedAgentPickerId) { _, newValue in
                 let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -461,6 +522,10 @@ struct SettingsTab: View {
                             self.locationEnabledModeRaw = previous
                             self.lastLocationModeRaw = previous
                         }
+                        return
+                    }
+                    await MainActor.run {
+                        self.gatewayController.refreshActiveGatewayRegistrationFromSettings()
                     }
                 }
             }
@@ -553,34 +618,11 @@ struct SettingsTab: View {
         if let server = self.appModel.gatewayServerName, self.isGatewayConnected {
             return server
         }
+        if let problem = self.appModel.lastGatewayProblem {
+            return problem.statusText
+        }
         let trimmed = self.appModel.gatewayStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "Not connected" : trimmed
-    }
-
-    private func platformString() -> String {
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        return "iOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
-    }
-
-    private func deviceFamily() -> String {
-        switch UIDevice.current.userInterfaceIdiom {
-        case .pad:
-            "iPad"
-        case .phone:
-            "iPhone"
-        default:
-            "iOS"
-        }
-    }
-
-    private func openClawVersionString() -> String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-        let trimmedBuild = build.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedBuild.isEmpty || trimmedBuild == version {
-            return version
-        }
-        return "\(version) (\(trimmedBuild))"
     }
 
     private func featureToggle(
@@ -628,7 +670,7 @@ struct SettingsTab: View {
 
     private func gatewayDebugText() -> String {
         var lines: [String] = [
-            "gateway: \(self.appModel.gatewayStatusText)",
+            "gateway: \(self.appModel.gatewayDisplayStatusText)",
             "discovery: \(self.gatewayController.discoveryStatusText)",
         ]
         lines.append("server: \(self.appModel.gatewayServerName ?? "—")")
@@ -705,7 +747,9 @@ struct SettingsTab: View {
         let hasToken = !self.gatewayToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasPassword = !self.gatewayPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         GatewayDiagnostics.log(
-            "setup code applied host=\(host) port=\(resolvedPort ?? -1) tls=\(self.manualGatewayTLS) token=\(hasToken) password=\(hasPassword)")
+            "setup code applied host=\(host) port=\(resolvedPort ?? -1) "
+                + "tls=\(self.manualGatewayTLS) token=\(hasToken) password=\(hasPassword)"
+        )
         guard let port = resolvedPort else {
             self.setupStatusText = "Failed: invalid port"
             return
@@ -751,11 +795,21 @@ struct SettingsTab: View {
         }
 
         let trimmedInstanceId = self.instanceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBootstrapToken =
+            payload.bootstrapToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedInstanceId.isEmpty {
+            GatewaySettingsStore.saveGatewayBootstrapToken(trimmedBootstrapToken, instanceId: trimmedInstanceId)
+        }
         if let token = payload.token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
             self.gatewayToken = trimmedToken
             if !trimmedInstanceId.isEmpty {
                 GatewaySettingsStore.saveGatewayToken(trimmedToken, instanceId: trimmedInstanceId)
+            }
+        } else if !trimmedBootstrapToken.isEmpty {
+            self.gatewayToken = ""
+            if !trimmedInstanceId.isEmpty {
+                GatewaySettingsStore.saveGatewayToken("", instanceId: trimmedInstanceId)
             }
         }
         if let password = payload.password, !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -763,6 +817,11 @@ struct SettingsTab: View {
             self.gatewayPassword = trimmedPassword
             if !trimmedInstanceId.isEmpty {
                 GatewaySettingsStore.saveGatewayPassword(trimmedPassword, instanceId: trimmedInstanceId)
+            }
+        } else if !trimmedBootstrapToken.isEmpty {
+            self.gatewayPassword = ""
+            if !trimmedInstanceId.isEmpty {
+                GatewaySettingsStore.saveGatewayPassword("", instanceId: trimmedInstanceId)
             }
         }
 
@@ -858,6 +917,9 @@ struct SettingsTab: View {
     }
 
     private var setupStatusLine: String? {
+        if let problem = self.appModel.lastGatewayProblem {
+            return problem.message
+        }
         let trimmedSetup = self.setupStatusText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let gatewayStatus = self.appModel.gatewayStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
         if let friendly = self.friendlyGatewayMessage(from: gatewayStatus) { return friendly }
@@ -880,7 +942,7 @@ struct SettingsTab: View {
         guard !trimmed.isEmpty else { return nil }
         let lower = trimmed.lowercased()
         if lower.contains("pairing required") {
-            return "Pairing required. Go back to Telegram and run /pair approve, then tap Connect again."
+            return "Pairing required. Go back to your OpenClaw chat and run /pair approve, then tap Connect again."
         }
         if lower.contains("device nonce required") || lower.contains("device nonce mismatch") {
             return "Secure handshake failed. Make sure Tailscale is connected, then tap Connect again."
@@ -956,6 +1018,14 @@ struct SettingsTab: View {
         SettingsNetworkingHelpers.httpURLString(host: host, port: port, fallback: fallback)
     }
 
+    private func retryGatewayConnectionFromProblem() async {
+        if self.manualGatewayEnabled || self.connectingGatewayID == "manual" {
+            await self.connectManual()
+            return
+        }
+        await self.connectLastKnown()
+    }
+
     private func resetOnboarding() {
         // Disconnect first so RootCanvas doesn't instantly mark onboarding complete again.
         self.appModel.disconnectGateway()
@@ -977,6 +1047,12 @@ struct SettingsTab: View {
 
         // Reset onboarding state + clear saved gateway connection (the two things RootCanvas checks).
         GatewaySettingsStore.clearLastGatewayConnection()
+        GatewaySettingsStore.clearPreferredGatewayStableID()
+        GatewaySettingsStore.clearLastDiscoveredGatewayStableID()
+        // Resetting onboarding should also forget trusted gateway TLS fingerprints.
+        // Otherwise a restarted dev gateway can stay stuck in a local TLS cancel loop.
+        GatewayTLSStore.clearAllFingerprints()
+        OnboardingStateStore.reset()
 
         // RootCanvas also short-circuits onboarding when these are true.
         self.onboardingComplete = false
@@ -1013,3 +1089,4 @@ struct SettingsTab: View {
         return lines
     }
 }
+// swiftlint:enable type_body_length
